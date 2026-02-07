@@ -1,7 +1,18 @@
-setTimeout(function() {
-    var exitFunc = new NativeFunction(
-        Module.findExportByName("libc.so", "exit"),
-        'void', ['int']
-    );
-    exitFunc(0);
-}, 30000);
+console.log("SERVER SCRIPT EXECUTED!");
+
+// Твой рабочий код
+var validVTable = null; 
+var GIFT_TARGET = "cyberDance";
+var moduleName = "libMyGame.so";
+
+// ... все функции ...
+
+// Запуск логики
+function waitForModule(callback) {
+   // ...
+}
+
+waitForModule(function(base) {
+    console.log("Module found, initializing hooks...");
+    // хуки
+});
