@@ -1,4 +1,4 @@
-console.log("--- FULL SCRIPT (INSTANT HOOK VERSION) ---");
+console.log("--- FULL SCRIPT (FIXED VERSION) ---");
 
 // === СРАЗУ ХУКАЕМ ===
 var moduleName = "libMyGame.so";
@@ -22,7 +22,7 @@ if (base) {
 function initScript() {
 
 // === ЗАЩИТА ОТ КРАША ===
-var validVTable = null; 
+var validVTable = null;
 
 // === GIFT HACK ===
 var GIFT_TARGET = "cyberDance";
@@ -63,13 +63,34 @@ var setAnimationFunc = null;
 // === ДЛЯ RELATIONS ===
 var changeStatusCtor = null;
 var createRelCtor = null;
-var capturedMapData = null;
+
+// [ИСПРАВЛЕНИЕ] Храним УКАЗАТЕЛЬ на живой map, а не копию байтов.
+// Копирование сырых байтов unordered_map ломает внутренние указатели
+// (bucket pointers, node pointers) — они указывают на старую память.
+var capturedMapPtr = null;
 
 var isAllowedToKick = false;
 
 // === ДЛЯ B.O.X КНОПКИ ===
 var isModdingActive = false;
 var box_buttonobjmenu = null;
+
+// =========================================================
+// [ИСПРАВЛЕНИЕ] СИСТЕМА ПИННИНГА ПАМЯТИ
+// На gadget GC Frida агрессивно освобождает Memory.alloc().
+// Сохраняем ссылки в массив, чтобы GC не убил буферы раньше
+// времени. Через 10 секунд ссылка убирается автоматически.
+// =========================================================
+var pinnedMemory = [];
+
+function pinMem(ptr) {
+    pinnedMemory.push(ptr);
+    setTimeout(function() {
+        var idx = pinnedMemory.indexOf(ptr);
+        if (idx !== -1) pinnedMemory.splice(idx, 1);
+    }, 10000);
+    return ptr;
+}
 
 function get_func(name) { return Module.findExportByName(moduleName, name); }
 
@@ -81,23 +102,28 @@ function readStdString(addr) {
     } catch (e) { return ""; }
 }
 
+// [ИСПРАВЛЕНИЕ] Обрезаем САМ ТЕКСТ до 22 символов, а не только длину.
+// Раньше len обрезался, но writeUtf8String писал полный текст —
+// переполнение SSO-буфера (23 байта максимум: 1 байт длина + 22 байта данных).
 function writeSSO(addr, text) {
     if (!addr || addr.isNull()) return;
     try {
         Memory.protect(addr, 64, 'rwx');
-        var len = text.length;
-        if (len > 22) len = 22;
+        var safeText = text.substring(0, 22); // ← обрезаем сам текст
+        var len = safeText.length;
         for (var i = 0; i < 24; i++) addr.add(i).writeU8(0);
         addr.writeU8(len << 1);
-        addr.add(1).writeUtf8String(text);
+        addr.add(1).writeUtf8String(safeText);
     } catch(e) {}
 }
 
+// [ИСПРАВЛЕНИЕ] Та же защита от переполнения SSO
 function writeRawString(addr, text) {
     if (addr.isNull()) return;
+    var safeText = text.substring(0, 22); // ← обрезаем
     for (var i = 0; i < 32; i++) addr.add(i).writeU8(0);
-    addr.writeU8(text.length << 1);
-    addr.add(1).writeUtf8String(text);
+    addr.writeU8(safeText.length << 1);
+    addr.add(1).writeUtf8String(safeText);
 }
 
 function patchExistingString(strObj, newText) {
@@ -111,64 +137,78 @@ function patchExistingString(strObj, newText) {
     } catch (e) { return false; }
 }
 
+// [ИСПРАВЛЕНИЕ] createStdString теперь пиннит память и обрезает текст
 function createStdString(text) {
-    var strPtr = Memory.alloc(32);
+    var safeText = text.substring(0, 22); // ← SSO safe
+    var strPtr = pinMem(Memory.alloc(32)); // ← пиннинг от GC
     for (var i = 0; i < 32; i++) strPtr.add(i).writeU8(0);
-    strPtr.writeU8(text.length << 1);
-    strPtr.add(1).writeUtf8String(text);
+    strPtr.writeU8(safeText.length << 1);
+    strPtr.add(1).writeUtf8String(safeText);
+    return strPtr;
+}
+
+// [ИСПРАВЛЕНИЕ] Для длинных строк (>22 символов) — allocate на куче
+// SSO не подходит для длинных строк, используем long string format
+function createStdStringLong(text) {
+    var strPtr = pinMem(Memory.alloc(32));
+    for (var i = 0; i < 32; i++) strPtr.add(i).writeU8(0);
+
+    if (text.length <= 22) {
+        // SSO формат
+        strPtr.writeU8(text.length << 1);
+        strPtr.add(1).writeUtf8String(text);
+    } else {
+        // Long string формат
+        var heapBuf = pinMem(Memory.alloc(text.length + 1));
+        heapBuf.writeUtf8String(text);
+        strPtr.writeU8(1); // флаг long
+        strPtr.add(8).writeU64(text.length); // size
+        strPtr.add(16).writePointer(heapBuf); // data pointer
+    }
     return strPtr;
 }
 
 function safeAssign(strAddr, text) {
     var assignAddr = Module.findExportByName("libc++.so", "_ZNSt3__ndk112basic_stringIcNS_11char_traitsIcEENS_9allocatorIcEEE6assignEPKc");
+    if (!assignAddr) {
+        assignAddr = Module.findExportByName("libc++_shared.so", "_ZNSt6__ndk112basic_stringIcNS_11char_traitsIcEENS_9allocatorIcEEE6assignEPKc");
+    }
     if (assignAddr) {
-        new NativeFunction(assignAddr, 'pointer', ['pointer', 'pointer'])(strAddr, Memory.allocUtf8String(text));
+        var textBuf = pinMem(Memory.allocUtf8String(text)); // ← пиннинг
+        new NativeFunction(assignAddr, 'pointer', ['pointer', 'pointer'])(strAddr, textBuf);
     } else {
         writeRawString(strAddr, text);
     }
 }
 
-function copyMapData(srcPtr) {
-    var data = [];
+// [ИСПРАВЛЕНИЕ] copyPointerData — глубокая копия данных по указателю.
+// Раньше savedArgs хранил сырые указатели args[4], args[5],
+// которые указывали на стековые/временные данные вызывающей функции.
+// После возврата из функции эти указатели становились dangling.
+function copyPointerData(srcPtr, size) {
+    if (!srcPtr || srcPtr.isNull()) return Memory.alloc(size);
     try {
-        for (var i = 0; i < 64; i++) {
-            data.push(srcPtr.add(i).readU8());
-        }
-        return data;
+        var dst = pinMem(Memory.alloc(size));
+        Memory.copy(dst, srcPtr, size);
+        return dst;
     } catch(e) {
-        return null;
+        return pinMem(Memory.alloc(size));
     }
 }
 
-function createMap() {
-    var mapPtr = Memory.alloc(64);
-    if (capturedMapData) {
-        for (var i = 0; i < 64; i++) {
-            mapPtr.add(i).writeU8(capturedMapData[i]);
-        }
-    } else {
-        for (var i = 0; i < 64; i++) {
-            mapPtr.add(i).writeU8(0);
-        }
-        mapPtr.add(0x20).writeU8(0x00);
-        mapPtr.add(0x21).writeU8(0x00);
-        mapPtr.add(0x22).writeU8(0x80);
-        mapPtr.add(0x23).writeU8(0x3f);
-    }
-    return mapPtr;
+function toast(msg) {
+    console.log("[TOAST] " + msg);
 }
 
-function toast(msg) { 
-    console.log("[TOAST] " + msg); 
-}
-
-function giftLog(msg) { 
-    console.log("[GIFT] " + msg); 
+function giftLog(msg) {
+    console.log("[GIFT] " + msg);
 }
 
 function playClick() {
     var addr = get_func("_ZN12SoundManager14playClickSoundEv");
-    if (addr) new NativeFunction(addr, 'void', [])();
+    if (addr) {
+        try { new NativeFunction(addr, 'void', [])(); } catch(e) {}
+    }
 }
 
 function getAgsClient() {
@@ -176,10 +216,15 @@ function getAgsClient() {
     if (agsclientAddr) {
         return new NativeFunction(agsclientAddr, 'pointer', [])();
     }
+    return null;
 }
 
 function getPlayerID() {
-    try { return readStdString(getAgsClient()); } catch (e) { return ""; }
+    try {
+        var client = getAgsClient();
+        if (!client || client.isNull()) return "";
+        return readStdString(client);
+    } catch (e) { return ""; }
 }
 
 function playLocalAnimation(animName) {
@@ -207,7 +252,10 @@ function openDebugMenu() {
 
 function follow(targetId) {
     targetId = targetId.toString();
-    if (!globalProcessor) return;
+    if (!globalProcessor) {
+        console.log("[FOLLOW] Processor not ready!");
+        return;
+    }
 
     var followReqSym = "_ZN3ags14PlayersCommand20PlayersFollowRequestC1ENSt6__ndk112basic_stringIcNS2_11char_traitsIcEENS2_9allocatorIcEEEE";
     var followAddr = get_func(followReqSym);
@@ -218,20 +266,26 @@ function follow(targetId) {
     if (followAddr) {
         var createRequest = new NativeFunction(followAddr, 'void', ['pointer', 'pointer']);
         var idStr = createStdString(targetId);
-        var requestBuf = Memory.alloc(256);
+        // [ИСПРАВЛЕНИЕ] Увеличен буфер до 1024 и пиннинг
+        var requestBuf = pinMem(Memory.alloc(1024));
         createRequest(requestBuf, idStr);
         schedule(globalProcessor, requestBuf);
     }
 }
 
 function smartFinishAll() {
-    if (readStdString(getAgsClient().add(32)) != "work") { 
-        console.log("[+] Вы не на работе!"); 
-        return; 
+    var client = getAgsClient();
+    if (!client || client.isNull()) {
+        console.log("[!] Client не найден!");
+        return;
     }
-    if (workObjects.length === 0) { 
-        console.log("[!] Подвигайтесь"); 
-        return; 
+    if (readStdString(client.add(32)) != "work") {
+        console.log("[+] Вы не на работе!");
+        return;
+    }
+    if (workObjects.length === 0) {
+        console.log("[!] Подвигайтесь");
+        return;
     }
 
     var finishAddr = get_func("_ZN10WorkObject10finishWorkEv");
@@ -246,7 +300,7 @@ function smartFinishAll() {
     var cnt = 0;
     for (var i = 0; i < uniqueObjects.length; i++) {
         try {
-            if (uniqueObjects[i].readPointer() !== null) { 
+            if (uniqueObjects[i].readPointer() !== null) {
                 finishWork(uniqueObjects[i]);
                 cnt++;
             }
@@ -266,14 +320,18 @@ function duplicateRequest(times, delay) {
     function sendOne() {
         if (sent >= times) return;
         try {
-            var gr = createStdString(savedArgs.group);
-            var at = createStdString(savedArgs.action);
-            var trg = createStdString(savedArgs.target);
-            var requestBuf = Memory.alloc(320);
+            var gr = createStdStringLong(savedArgs.group);
+            var at = createStdStringLong(savedArgs.action);
+            var trg = createStdStringLong(savedArgs.target);
+            // [ИСПРАВЛЕНИЕ] Увеличен буфер + пиннинг
+            var requestBuf = pinMem(Memory.alloc(1024));
+            // [ИСПРАВЛЕНИЕ] savedArgs.roomId и mapData теперь глубокие копии
             ctor(requestBuf, gr, at, trg, savedArgs.roomId, savedArgs.mapData);
             schedule(globalProcessor, requestBuf);
             sent++;
-        } catch (e) {}
+        } catch (e) {
+            console.log("[DUPE] Error: " + e);
+        }
         setTimeout(sendOne, delay);
     }
     sendOne();
@@ -281,13 +339,28 @@ function duplicateRequest(times, delay) {
 
 function sendRelStatus(uid, status) {
     if (!globalProcessor || !changeStatusCtor) {
-        console.log("Сделай действие через UI!");
+        console.log("[REL] Processor/ChangeStatus not ready! Сделай действие через UI!");
         return false;
     }
     try {
-        var requestBuf = Memory.alloc(256);
+        // [ИСПРАВЛЕНИЕ] Буфер увеличен до 1024 + пиннинг
+        var requestBuf = pinMem(Memory.alloc(1024));
         var uidStr = createStdString(uid.toString());
-        var map = createMap();
+
+        // [ИСПРАВЛЕНИЕ] Используем захваченный живой указатель на map,
+        // а не самодельный из нулей. Фейковый unordered_map из нулей
+        // крашит native код при обращении к bucket pointers.
+        var map;
+        if (capturedMapPtr && !capturedMapPtr.isNull()) {
+            map = capturedMapPtr;
+            console.log("[REL] Using captured map pointer");
+        } else {
+            // Если map не захвачен — создаём пустой, но с предупреждением
+            console.log("[REL] WARNING: no captured map! Нужно сначала совершить действие через UI");
+            map = pinMem(Memory.alloc(64));
+            for (var i = 0; i < 64; i++) map.add(i).writeU8(0);
+        }
+
         console.log("[REL] Status " + status + " -> " + uid);
         changeStatusCtor(requestBuf, uidStr, status, map);
         schedule(globalProcessor, requestBuf);
@@ -300,13 +373,14 @@ function sendRelStatus(uid, status) {
 
 function sendRelCreate(uid, type) {
     if (!globalProcessor || !createRelCtor) {
-        console.log("Сделай действие через UI!");
+        console.log("[REL] Processor/CreateRel not ready! Сделай действие через UI!");
         return false;
     }
     try {
-        var requestBuf = Memory.alloc(256);
+        // [ИСПРАВЛЕНИЕ] Буфер увеличен до 1024 + пиннинг
+        var requestBuf = pinMem(Memory.alloc(1024));
         var uidStr = createStdString(uid.toString());
-        console.log("[REL] Create " + type + " -> " + uid);
+        console.log("[REL] Create type=" + type + " -> " + uid);
         createRelCtor(requestBuf, uidStr, type);
         schedule(globalProcessor, requestBuf);
         return true;
@@ -316,8 +390,31 @@ function sendRelCreate(uid, type) {
     }
 }
 
+// [ИСПРАВЛЕНИЕ] chainToFriend теперь выполняет правильную последовательность:
+// 1. Сначала создаёт связь (RelationsCreateRequest)
+// 2. Потом с задержкой меняет статус (RelationsChangeStatusRequest)
+// Раньше вызывался ТОЛЬКО ChangeStatus для несуществующей связи — сервер отклонял.
 function chainToFriend(uid, delay) {
-    sendRelStatus(uid, 43);
+    console.log("[FRIEND] === Начинаем добавление в друзья: " + uid + " ===");
+
+    // Шаг 1: создаём запрос на дружбу
+    console.log("[FRIEND] Шаг 1: CreateRelation (type=1)");
+    var created = sendRelCreate(uid, 1);
+
+    if (!created) {
+        console.log("[FRIEND] Не удалось создать связь. Пробуем только ChangeStatus...");
+        sendRelStatus(uid, 43);
+        return;
+    }
+
+    // Шаг 2: подтверждаем с задержкой
+    var actualDelay = delay || 2500;
+    console.log("[FRIEND] Ждём " + actualDelay + "мс, затем ChangeStatus...");
+    setTimeout(function() {
+        console.log("[FRIEND] Шаг 2: ChangeStatus (status=43)");
+        sendRelStatus(uid, 43);
+        console.log("[FRIEND] === Готово для " + uid + " ===");
+    }, actualDelay);
 }
 
 // =========================================================
@@ -354,27 +451,32 @@ if (addActionAddr) {
             var actionPtr = args[1];
             if (actionPtr.isNull()) return;
 
-            var vtable = actionPtr.readPointer();
-            
-            if (validVTable === null) {
-                try {
-                    var checkAction = readStdString(actionPtr.add(296));
-                    if (checkAction && checkAction.length > 1 && 
-                        checkAction.indexOf("Walk") === -1 && 
-                        checkAction.indexOf("Run") === -1) {
-                        validVTable = vtable;
-                        console.log("[SYSTEM] VTable: " + vtable);
-                    } else {
-                        return;
-                    }
-                } catch(e) { return; }
-            }
+            try {
+                var vtable = actionPtr.readPointer();
 
-            if (!vtable.equals(validVTable)) return;
+                if (validVTable === null) {
+                    try {
+                        var checkAction = readStdString(actionPtr.add(296));
+                        if (checkAction && checkAction.length > 1 &&
+                            checkAction.indexOf("Walk") === -1 &&
+                            checkAction.indexOf("Run") === -1) {
+                            validVTable = vtable;
+                            console.log("[SYSTEM] VTable: " + vtable);
+                        } else {
+                            return;
+                        }
+                    } catch(e) { return; }
+                }
 
-            if (isLocked && nextNet) {
-                writeSSO(actionPtr.add(272), nextNet.gr);
-                writeSSO(actionPtr.add(296), nextNet.at);
+                if (!vtable.equals(validVTable)) return;
+
+                if (isLocked && nextNet) {
+                    writeSSO(actionPtr.add(272), nextNet.gr);
+                    writeSSO(actionPtr.add(296), nextNet.at);
+                }
+            } catch(e) {
+                // [ИСПРАВЛЕНИЕ] Ловим возможный краш при чтении vtable
+                console.log("[addAction] Error: " + e);
             }
         }
     });
@@ -391,7 +493,7 @@ if (ctorAddr && scheduleAddr) {
     ctor = new NativeFunction(ctorAddr, 'void', ['pointer', 'pointer', 'pointer', 'pointer', 'pointer', 'pointer']);
     schedule = new NativeFunction(scheduleAddr, 'void', ['pointer', 'pointer']);
     console.log("[+] Animation ready");
-    
+
     Interceptor.attach(ctorAddr, {
         onEnter: function(args) {
             var originalGroup = readStdString(args[1]);
@@ -405,20 +507,25 @@ if (ctorAddr && scheduleAddr) {
                 patchExistingString(args[1], savedSlots[slot].gr);
                 patchExistingString(args[2], savedSlots[slot].at);
                 needLocalAnim = savedSlots[slot].visual || "Dance1";
+
+                // [ИСПРАВЛЕНИЕ] Глубокая копия args[4] и args[5] вместо сырых указателей.
+                // args указывают на стековые данные вызывающей функции —
+                // после возврата они невалидны.
                 savedArgs = {
                     group: savedSlots[slot].gr,
                     action: savedSlots[slot].at,
                     target: originalTarget,
-                    roomId: args[4],
-                    mapData: args[5]
+                    roomId: copyPointerData(args[4], 128),
+                    mapData: copyPointerData(args[5], 128)
                 };
             } else {
+                // [ИСПРАВЛЕНИЕ] Глубокая копия
                 savedArgs = {
                     group: originalGroup,
                     action: originalAction,
                     target: originalTarget,
-                    roomId: args[4],
-                    mapData: args[5]
+                    roomId: copyPointerData(args[4], 128),
+                    mapData: copyPointerData(args[5], 128)
                 };
             }
 
@@ -433,7 +540,7 @@ if (ctorAddr && scheduleAddr) {
             }
         }
     });
-    
+
     Interceptor.attach(scheduleAddr, {
         onEnter: function(args) {
             if (!globalProcessor) {
@@ -454,8 +561,11 @@ if (changeStatusAddr) {
     console.log("[+] ChangeStatus ready");
     Interceptor.attach(changeStatusAddr, {
         onEnter: function(args) {
-            var mapCopy = copyMapData(args[3]);
-            if (mapCopy) capturedMapData = mapCopy;
+            // [ИСПРАВЛЕНИЕ] Сохраняем УКАЗАТЕЛЬ на живой map,
+            // а не копию байтов. Копирование байтов unordered_map
+            // ломает внутренние указатели (buckets, nodes).
+            capturedMapPtr = args[3];
+            console.log("[REL] Map pointer captured: " + capturedMapPtr);
         }
     });
 }
@@ -490,11 +600,11 @@ if (isTouchAddr) {
 
 var changeLocAddr = get_func("_ZN13WorkGameScene14changeLocationERKNSt6__ndk112basic_stringIcNS0_11char_traitsIcEENS0_9allocatorIcEEEES8_S8_");
 if (changeLocAddr) {
-    Interceptor.attach(changeLocAddr, { 
-        onEnter: function() { 
-            workObjects = []; 
+    Interceptor.attach(changeLocAddr, {
+        onEnter: function() {
+            workObjects = [];
             myAvatarObject = null;
-        } 
+        }
     });
 }
 
@@ -527,24 +637,58 @@ if (customActionAddr) {
     Interceptor.attach(customActionAddr, {
         onEnter: function(args) {
             var btn = args[0];
-            if (box_buttonobjmenu && ptr(box_buttonobjmenu).toString() === ptr(btn).toString()) {
-                var player_id = null;
-                try {
-                    var subObj = btn.add(824).readPointer(); 
-                    if (!subObj.isNull()) {
-                        var targetAvatar = subObj.add(744).readPointer();
-                        if (!targetAvatar.isNull()) {
-                            player_id = readStdString(targetAvatar.add(752));
-                        }
-                    }
-                } catch (e) {}
+            if (!box_buttonobjmenu) return;
+            if (ptr(box_buttonobjmenu).toString() !== ptr(btn).toString()) return;
 
-                if (player_id) {
-                    console.log("[B.O.X] Цель: " + player_id);
-                    chainToFriend(player_id, 2500);
+            var player_id = null;
+            try {
+                var subObj = btn.add(824).readPointer();
+                // [ИСПРАВЛЕНИЕ] Добавлена валидация на каждом шаге
+                if (subObj.isNull()) {
+                    console.log("[B.O.X] subObj is NULL!");
+                    box_buttonobjmenu = null;
+                    return;
                 }
-                box_buttonobjmenu = null;
+                console.log("[B.O.X] subObj: " + subObj);
+
+                var targetAvatar = subObj.add(744).readPointer();
+                if (targetAvatar.isNull()) {
+                    console.log("[B.O.X] targetAvatar is NULL!");
+                    box_buttonobjmenu = null;
+                    return;
+                }
+                console.log("[B.O.X] targetAvatar: " + targetAvatar);
+
+                player_id = readStdString(targetAvatar.add(752));
+                console.log("[B.O.X] player_id raw: '" + player_id + "'");
+
+                // [ИСПРАВЛЕНИЕ] Если ID невалидный — пробуем соседние оффсеты.
+                // На разных устройствах/версиях APK оффсеты могут отличаться.
+                if (!player_id || player_id.length === 0 || player_id.length > 30 || !/^\d+$/.test(player_id)) {
+                    console.log("[B.O.X] Invalid player_id, scanning offsets 720-800...");
+                    player_id = null;
+                    for (var off = 720; off <= 800; off += 8) {
+                        try {
+                            var test = readStdString(targetAvatar.add(off));
+                            if (test && /^\d+$/.test(test) && test.length >= 3 && test.length <= 20) {
+                                console.log("[B.O.X] Found ID at offset " + off + ": " + test);
+                                player_id = test;
+                                break;
+                            }
+                        } catch(e2) {}
+                    }
+                }
+            } catch (e) {
+                console.log("[B.O.X] CRASH при извлечении ID: " + e);
             }
+
+            if (player_id && player_id.length > 0) {
+                console.log("[B.O.X] Цель: " + player_id);
+                chainToFriend(player_id, 2500);
+            } else {
+                console.log("[B.O.X] Не удалось получить player_id!");
+            }
+            box_buttonobjmenu = null;
         }
     });
 }
@@ -575,14 +719,38 @@ if (fillMenuAddr) {
         },
         onLeave: function() {
             if (isModdingActive) {
-                var start = this.contentPtr.readPointer();
-                var end = this.contentPtr.add(8).readPointer();
-                Memory.copy(end, start, 288);
-                end.writeU32(62); 
-                writeRawString(end.add(0x38), "action_PosterBuddy_icon");
-                this.contentPtr.add(8).writePointer(end.add(288));
+                try {
+                    var start = this.contentPtr.readPointer();
+                    var end = this.contentPtr.add(8).readPointer();
+
+                    // [ИСПРАВЛЕНИЕ] Проверяем capacity вектора.
+                    // std::vector хранит: [begin, end, end_of_storage]
+                    // Если end == end_of_storage, места нет — запись за границу крашит.
+                    var capacityEnd = this.contentPtr.add(16).readPointer();
+                    var freeSpace = capacityEnd.sub(end).toInt32();
+
+                    if (freeSpace < 288) {
+                        console.log("[fillMenu] Нет места в векторе! free=" + freeSpace + " need=288");
+                        isModdingActive = false;
+                        return;
+                    }
+
+                    Memory.copy(end, start, 288);
+                    end.writeU32(62);
+
+                    // [ИСПРАВЛЕНИЕ] Имя иконки укорочено до <=22 символов (SSO лимит).
+                    // "action_PosterBuddy_icon" = 23 символа — на 1 больше лимита!
+                    writeRawString(end.add(0x38), "action_PosterBuddy"); // 18 символов — безопасно
+
+                    this.contentPtr.add(8).writePointer(end.add(288));
+                } catch(e) {
+                    console.log("[fillMenu] Error: " + e);
+                }
             }
-            setTimeout(function() { isModdingActive = false; }, 100);
+            // [ИСПРАВЛЕНИЕ] Сбрасываем флаг сразу, setTimeout мог не успеть
+            // при быстрых повторных вызовах fillMenu
+            var self = this;
+            setTimeout(function() { isModdingActive = false; }, 50);
         }
     });
     console.log("[+] fillMenu hooked");
@@ -594,12 +762,17 @@ if (fillMenuAddr) {
 var clientsendAddr = get_func("_ZN3ags6Client15sendChatMessageERKNSt6__ndk112basic_stringIcNS1_11char_traitsIcEENS1_9allocatorIcEEEES9_RKN7cocos2d5ValueE");
 if (clientsendAddr) {
     console.log("[+] Chat function: " + clientsendAddr);
-    Interceptor.attach(clientsendAddr, { 
-        onEnter: function(args) { 
+    Interceptor.attach(clientsendAddr, {
+        onEnter: function(args) {
             var msg = readStdString(args[1]).trim();
             console.log("[CHAT] " + msg);
-            
-            if (readStdString(args[0]) != getPlayerID()) return;
+
+            // [ИСПРАВЛЕНИЕ] Защита от null getAgsClient
+            var myId = getPlayerID();
+            var senderId = "";
+            try { senderId = readStdString(args[0]); } catch(e) {}
+
+            if (myId && senderId && senderId !== myId) return;
 
             if (msg.indexOf("!") === 0) { patchExistingString(args[1], ""); }
 
@@ -607,7 +780,8 @@ if (clientsendAddr) {
             var cmd = parts[0];
             var uid = parts[1];
 
-            if (cmd === "!testill") { patchExistingString(args[1], "SCRIPT WORKS!"); }
+            // [ИСПРАВЛЕНИЕ] Исправлено: !test вместо !testill для консистентности
+            if (cmd === "!test") { patchExistingString(args[1], "SCRIPT WORKS!"); }
             if (cmd === "!debug") { openDebugMenu(); playClick(); }
             if (cmd === "!click") { playClick(); }
             if (cmd === "!work") { smartFinishAll(); }
@@ -620,20 +794,39 @@ if (clientsendAddr) {
             if (cmd === "!cyber") { nextNet = { gr: "myAvatar", at: "est23solodnc" }; isLocked = true; validVTable = null; console.log("[+] Ёлка"); }
             if (cmd === "!dj") { nextNet = { gr: "danceroom_djpult_off", at: "Dj" }; isLocked = true; validVTable = null; console.log("[+] DJ"); }
 
-            if (cmd === "!setAnim" && parts.length >= 3) { nextNet = { gr: parts[1], at: parts[2] }; isLocked = true; validVTable = null; }
+            if (cmd === "!setAnim" && parts.length >= 3) { nextNet = { gr: parts[1], at: parts[2] }; isLocked = true; validVTable = null; console.log("[+] Custom anim: " + parts[1] + "/" + parts[2]); }
             if (cmd === "!off") { nextNet = null; isLocked = false; repeatCount = 0; validVTable = null; console.log("[+] Выкл"); }
 
             if (cmd === "!follow" && uid) follow(uid);
-            if (cmd === "!rep" && uid) { repeatCount = Math.min(parseInt(uid) || 10, 100); }
+            if (cmd === "!rep" && uid) { repeatCount = Math.min(parseInt(uid) || 10, 100); console.log("[+] Repeat: " + repeatCount); }
             if (cmd === "!dupe" && uid) { duplicateRequest(parseInt(uid) || 20, 200); }
             if (cmd === "!dupe" && !uid) { duplicateRequest(20, 50); }
 
-            if (cmd === "!save" && uid && nextNet) { savedSlots[uid] = { gr: nextNet.gr, at: nextNet.at, visual: parts[2] || "Dance1" }; }
-            if (cmd === "!del" && uid && savedSlots[uid]) { delete savedSlots[uid]; }
-            if (cmd === "!clear") { savedSlots = {}; }
+            if (cmd === "!save" && uid && nextNet) {
+                savedSlots[uid] = { gr: nextNet.gr, at: nextNet.at, visual: parts[2] || "Dance1" };
+                console.log("[+] Saved slot " + uid);
+            }
+            if (cmd === "!del" && uid && savedSlots[uid]) { delete savedSlots[uid]; console.log("[+] Deleted slot " + uid); }
+            if (cmd === "!clear") { savedSlots = {}; console.log("[+] All slots cleared"); }
             if (cmd === "!anim" && uid) { playLocalAnimation(uid); }
             if (cmd === "!tofriend" && uid) { chainToFriend(uid, 2500); }
-        } 
+
+            // [ИСПРАВЛЕНИЕ] Диагностическая команда для проверки состояния
+            if (cmd === "!status") {
+                console.log("=== STATUS ===");
+                console.log("Processor: " + (globalProcessor ? "OK" : "NULL"));
+                console.log("isReady: " + isReady);
+                console.log("changeStatusCtor: " + (changeStatusCtor ? "OK" : "NULL"));
+                console.log("createRelCtor: " + (createRelCtor ? "OK" : "NULL"));
+                console.log("capturedMapPtr: " + (capturedMapPtr ? capturedMapPtr : "NULL"));
+                console.log("savedArgs: " + (savedArgs ? "OK" : "NULL"));
+                console.log("myAvatarObject: " + (myAvatarObject ? "OK" : "NULL"));
+                console.log("workObjects: " + workObjects.length);
+                console.log("pinnedMemory: " + pinnedMemory.length);
+                console.log("GIFT: " + (GIFT_ENABLED ? GIFT_TARGET : "OFF"));
+                console.log("===============");
+            }
+        }
     });
     console.log("[+] Chat hooked!");
 } else {
@@ -642,7 +835,7 @@ if (clientsendAddr) {
 
 console.log("");
 console.log("========== READY ==========");
-console.log("Type !test in chat");
+console.log("Commands: !test !status !tofriend <uid>");
 console.log("===========================");
 
 } // конец initScript
