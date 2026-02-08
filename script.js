@@ -646,5 +646,3 @@ console.log("Type !test in chat");
 console.log("===========================");
 
 } // конец initScript
-});
-}
