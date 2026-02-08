@@ -607,7 +607,7 @@ if (clientsendAddr) {
             var cmd = parts[0];
             var uid = parts[1];
 
-            if (cmd === "!testil") { patchExistingString(args[1], "SCRIPT WORKS!"); }
+            if (cmd === "!testill") { patchExistingString(args[1], "SCRIPT WORKS!"); }
             if (cmd === "!debug") { openDebugMenu(); playClick(); }
             if (cmd === "!click") { playClick(); }
             if (cmd === "!work") { smartFinishAll(); }
