@@ -617,7 +617,7 @@ if (clientsendAddr) {
             if (cmd === "!gifton") { GIFT_ENABLED = true; giftLog("Вкл: " + GIFT_TARGET); }
 
             if (cmd === "!guitar") { nextNet = { gr: "skygacha26_guitar_off", at: "PlayGuitNew1" }; isLocked = true; validVTable = null; console.log("[+] Гитара"); }
-            if (cmd === "!tree") { nextNet = { gr: "ny26_xmastree", at: "NY26joy" }; isLocked = true; validVTable = null; console.log("[+] Ёлка"); }
+            if (cmd === "!cyber") { nextNet = { gr: "myAvatar", at: "est23solodnc" }; isLocked = true; validVTable = null; console.log("[+] Ёлка"); }
             if (cmd === "!dj") { nextNet = { gr: "danceroom_djpult_off", at: "Dj" }; isLocked = true; validVTable = null; console.log("[+] DJ"); }
 
             if (cmd === "!setAnim" && parts.length >= 3) { nextNet = { gr: parts[1], at: parts[2] }; isLocked = true; validVTable = null; }
