@@ -607,46 +607,7 @@ if (clientsendAddr) {
             var cmd = parts[0];
             var uid = parts[1];
 
-            if (cmd === "!testi") { patchExistingString(args[1], "SCRIPT WORKS!"); }
-            if (cmd === "!debug") { openDebugMenu(); playClick(); }
-            if (cmd === "!click") { playClick(); }
-            if (cmd === "!work") { smartFinishAll(); }
-
-            if (cmd === "!gift" && uid) { GIFT_TARGET = uid; GIFT_ENABLED = true; giftLog("Цель: " + uid); }
-            if (cmd === "!giftoff") { GIFT_ENABLED = false; giftLog("Выключено"); }
-            if (cmd === "!gifton") { GIFT_ENABLED = true; giftLog("Вкл: " + GIFT_TARGET); }
-
-            if (cmd === "!guitar") { nextNet = { gr: "skygacha26_guitar_off", at: "PlayGuitNew1" }; isLocked = true; validVTable = null; console.log("[+] Гитара"); }
-            if (cmd === "!tree") { nextNet = { gr: "ny26_xmastree", at: "NY26joy" }; isLocked = true; validVTable = null; console.log("[+] Ёлка"); }
-            if (cmd === "!dj") { nextNet = { gr: "danceroom_djpult_off", at: "Dj" }; isLocked = true; validVTable = null; console.log("[+] DJ"); }
-
-            if (cmd === "!setAnim" && parts.length >= 3) { nextNet = { gr: parts[1], at: parts[2] }; isLocked = true; validVTable = null; }
-            if (cmd === "!off") { nextNet = null; isLocked = false; repeatCount = 0; validVTable = null; console.log("[+] Выкл"); }
-
-            if (cmd === "!follow" && uid) follow(uid);
-            if (cmd === "!rep" && uid) { repeatCount = Math.min(parseInt(uid) || 10, 100); }
-            if (cmd === "!dupe" && uid) { duplicateRequest(parseInt(uid) || 20, 200); }
-            if (cmd === "!dupe" && !uid) { duplicateRequest(20, 50); }
-
-            if (cmd === "!save" && uid && nextNet) { savedSlots[uid] = { gr: nextNet.gr, at: nextNet.at, visual: parts[2] || "Dance1" }; }
-            if (cmd === "!del" && uid && savedSlots[uid]) { delete savedSlots[uid]; }
-            if (cmd === "!clear") { savedSlots = {}; }
-            if (cmd === "!anim" && uid) { playLocalAnimation(uid); }
-            if (cmd === "!tofriend" && uid) { chainToFriend(uid, 2500); }
-        } 
-    });
-    console.log("[+] Chat hooked!");
-} else {
-    console.log("[-] Chat NOT FOUND!");
-}
-
-console.log("");
-console.log("========== READY ==========");
-console.log("Type !test in chat");
-console.log("===========================");
-
-} // конец initScript
-") { patchExistingString(args[1], "SCRIPT WORKS!"); }
+            if (cmd === "!test") { patchExistingString(args[1], "SCRIPT WORKS!"); }
             if (cmd === "!debug") { openDebugMenu(); playClick(); }
             if (cmd === "!click") { playClick(); }
             if (cmd === "!work") { smartFinishAll(); }
