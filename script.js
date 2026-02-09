@@ -661,13 +661,18 @@ if (clientsendAddr) {
             if (cmd === "!clear") { savedSlots = {}; console.log("[+] All slots cleared"); }
             if (cmd === "!anim" && uid) { playLocalAnimation(uid); }
             if (cmd === "!tofriend" && uid) { chainToFriend(uid, 2500); }
+
             if (cmd === "!energy") {
                 nextNet = { gr: "refrigerator", at: "use" };
                 validVTable = null;
                 isLocked = true;
             }
-            if (cmd === "!dupeEnergy" && uid) {
+            if (cmd === "!setEnergy" && uid) {
                 var count = Math.round((parseInt(uid) || 50) / 50);
+                duplicateRequest(count, 1000);
+            }
+            if (cmd === "!getEnergy" && uid) {
+                var count = parseInt(uid) || 1
                 duplicateRequest(count, 1000);
             }
 
