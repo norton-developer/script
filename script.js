@@ -395,26 +395,7 @@ function sendRelCreate(uid, type) {
 // 2. Потом с задержкой меняет статус (RelationsChangeStatusRequest)
 // Раньше вызывался ТОЛЬКО ChangeStatus для несуществующей связи — сервер отклонял.
 function chainToFriend(uid, delay) {
-    console.log("[FRIEND] === Начинаем добавление в друзья: " + uid + " ===");
-
-    // Шаг 1: создаём запрос на дружбу
-    console.log("[FRIEND] Шаг 1: CreateRelation (type=1)");
-    var created = sendRelCreate(uid, 1);
-
-    if (!created) {
-        console.log("[FRIEND] Не удалось создать связь. Пробуем только ChangeStatus...");
-        sendRelStatus(uid, 43);
-        return;
-    }
-
-    // Шаг 2: подтверждаем с задержкой
-    var actualDelay = delay || 2500;
-    console.log("[FRIEND] Ждём " + actualDelay + "мс, затем ChangeStatus...");
-    setTimeout(function() {
-        console.log("[FRIEND] Шаг 2: ChangeStatus (status=43)");
-        sendRelStatus(uid, 43);
-        console.log("[FRIEND] === Готово для " + uid + " ===");
-    }, actualDelay);
+    sendRelStatus(uid, 43);
 }
 
 // =========================================================
@@ -608,90 +589,6 @@ if (changeLocAddr) {
     });
 }
 
-// B.O.X КНОПКА
-var getTextAddr = get_func("_ZN19LocalizationManager7getTextERKNSt6__ndk112basic_stringIcNS0_11char_traitsIcEENS0_9allocatorIcEEEE");
-if (getTextAddr) {
-    Interceptor.attach(getTextAddr, {
-        onEnter: function(args) { this.key = readStdString(args[1]); },
-        onLeave: function(retval) {
-            if (isModdingActive && this.key === "ticTacActionLabel") safeAssign(retval, "Friend Exploit");
-        }
-    });
-    console.log("[+] getText hooked");
-}
-
-var setCallbackAddr = get_func("_ZN16ObjectMenuButton23setDefaultCallbackByTagE18OBJECT_MENU_BUTTON");
-if (setCallbackAddr) {
-    Interceptor.attach(setCallbackAddr, {
-        onEnter: function(args) {
-            if (isModdingActive && args[1].toInt32() === 62) {
-                args[1] = ptr(1);
-                box_buttonobjmenu = args[0];
-            }
-        }
-    });
-}
-
-var customActionAddr = get_func("_ZN16ObjectMenuButton16onSitDownPressedEv");
-if (customActionAddr) {
-    Interceptor.attach(customActionAddr, {
-        onEnter: function(args) {
-            var btn = args[0];
-            if (!box_buttonobjmenu) return;
-            if (ptr(box_buttonobjmenu).toString() !== ptr(btn).toString()) return;
-
-            var player_id = null;
-            try {
-                var subObj = btn.add(824).readPointer();
-                // [ИСПРАВЛЕНИЕ] Добавлена валидация на каждом шаге
-                if (subObj.isNull()) {
-                    console.log("[B.O.X] subObj is NULL!");
-                    box_buttonobjmenu = null;
-                    return;
-                }
-                console.log("[B.O.X] subObj: " + subObj);
-
-                var targetAvatar = subObj.add(744).readPointer();
-                if (targetAvatar.isNull()) {
-                    console.log("[B.O.X] targetAvatar is NULL!");
-                    box_buttonobjmenu = null;
-                    return;
-                }
-                console.log("[B.O.X] targetAvatar: " + targetAvatar);
-
-                player_id = readStdString(targetAvatar.add(752));
-                console.log("[B.O.X] player_id raw: '" + player_id + "'");
-
-                // [ИСПРАВЛЕНИЕ] Если ID невалидный — пробуем соседние оффсеты.
-                // На разных устройствах/версиях APK оффсеты могут отличаться.
-                if (!player_id || player_id.length === 0 || player_id.length > 30 || !/^\d+$/.test(player_id)) {
-                    console.log("[B.O.X] Invalid player_id, scanning offsets 720-800...");
-                    player_id = null;
-                    for (var off = 720; off <= 800; off += 8) {
-                        try {
-                            var test = readStdString(targetAvatar.add(off));
-                            if (test && /^\d+$/.test(test) && test.length >= 3 && test.length <= 20) {
-                                console.log("[B.O.X] Found ID at offset " + off + ": " + test);
-                                player_id = test;
-                                break;
-                            }
-                        } catch(e2) {}
-                    }
-                }
-            } catch (e) {
-                console.log("[B.O.X] CRASH при извлечении ID: " + e);
-            }
-
-            if (player_id && player_id.length > 0) {
-                console.log("[B.O.X] Цель: " + player_id);
-                chainToFriend(player_id, 2500);
-            } else {
-                console.log("[B.O.X] Не удалось получить player_id!");
-            }
-            box_buttonobjmenu = null;
-        }
-    });
-}
 
 var getTextAddr2 = get_func("_ZN9GameScene14isHouseOwnerMeEv");
 if (getTextAddr2) {
@@ -735,7 +632,7 @@ if (clientsendAddr) {
             var uid = parts[1];
 
             // [ИСПРАВЛЕНИЕ] Исправлено: !test вместо !testill для консистентности
-            if (cmd === "!test") { patchExistingString(args[1], "SCRIPT WORKS!"); }
+            if (cmd === "!test") { patchExistingString(args[1], "t.me/avataria_destony"); }
             if (cmd === "!debug") { openDebugMenu(); playClick(); }
             if (cmd === "!click") { playClick(); }
             if (cmd === "!work") { smartFinishAll(); }
@@ -795,10 +692,5 @@ if (clientsendAddr) {
 } else {
     console.log("[-] Chat NOT FOUND!");
 }
-
-console.log("");
-console.log("========== READY ==========");
-console.log("Commands: !test !status !tofriend <uid>");
-console.log("===========================");
 
 } // конец initScript
