@@ -710,52 +710,6 @@ if (fillMenuAddr22) {
     });
 }
 
-var fillMenuAddr = get_func("_ZN17ObjectMenuManager17fillMenuForObjectER17ObjectMenuContentRKNSt6__ndk112basic_stringIcNS2_11char_traitsIcEENS2_9allocatorIcEEEESA_");
-if (fillMenuAddr) {
-    Interceptor.attach(fillMenuAddr, {
-        onEnter: function(args) {
-            this.contentPtr = args[1];
-            if (readStdString(args[2]) === "avatar") isModdingActive = true;
-        },
-        onLeave: function() {
-            if (isModdingActive) {
-                try {
-                    var start = this.contentPtr.readPointer();
-                    var end = this.contentPtr.add(8).readPointer();
-
-                    // [ИСПРАВЛЕНИЕ] Проверяем capacity вектора.
-                    // std::vector хранит: [begin, end, end_of_storage]
-                    // Если end == end_of_storage, места нет — запись за границу крашит.
-                    var capacityEnd = this.contentPtr.add(16).readPointer();
-                    var freeSpace = capacityEnd.sub(end).toInt32();
-
-                    if (freeSpace < 288) {
-                        console.log("[fillMenu] Нет места в векторе! free=" + freeSpace + " need=288");
-                        isModdingActive = false;
-                        return;
-                    }
-
-                    Memory.copy(end, start, 288);
-                    end.writeU32(62);
-
-                    // [ИСПРАВЛЕНИЕ] Имя иконки укорочено до <=22 символов (SSO лимит).
-                    // "action_PosterBuddy_icon" = 23 символа — на 1 больше лимита!
-                    writeRawString(end.add(0x38), "action_PosterBuddy"); // 18 символов — безопасно
-
-                    this.contentPtr.add(8).writePointer(end.add(288));
-                } catch(e) {
-                    console.log("[fillMenu] Error: " + e);
-                }
-            }
-            // [ИСПРАВЛЕНИЕ] Сбрасываем флаг сразу, setTimeout мог не успеть
-            // при быстрых повторных вызовах fillMenu
-            var self = this;
-            setTimeout(function() { isModdingActive = false; }, 50);
-        }
-    });
-    console.log("[+] fillMenu hooked");
-}
-
 // =========================================================
 // ОБРАБОТЧИК ЧАТА
 // =========================================================
@@ -810,6 +764,15 @@ if (clientsendAddr) {
             if (cmd === "!clear") { savedSlots = {}; console.log("[+] All slots cleared"); }
             if (cmd === "!anim" && uid) { playLocalAnimation(uid); }
             if (cmd === "!tofriend" && uid) { chainToFriend(uid, 2500); }
+            if (cmd === "!energy") {
+                nextNet = { gr: "refrigerator", at: "use" };
+                validVTable = null;
+                isLocked = true;
+            }
+            if (cmd === "!dupeEnergy" && uid) {
+                var count = Math.round((parseInt(uid) || 50) / 50);
+                duplicateRequest(count, 1000);
+            }
 
             // [ИСПРАВЛЕНИЕ] Диагностическая команда для проверки состояния
             if (cmd === "!status") {
