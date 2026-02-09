@@ -662,17 +662,13 @@ if (clientsendAddr) {
             if (cmd === "!anim" && uid) { playLocalAnimation(uid); }
             if (cmd === "!tofriend" && uid) { chainToFriend(uid, 2500); }
 
-            if (cmd === "!energy") {
+            if (cmd === "!getEnergy") {
                 nextNet = { gr: "refrigerator", at: "use" };
                 validVTable = null;
                 isLocked = true;
             }
             if (cmd === "!setEnergy" && uid) {
                 var count = Math.round((parseInt(uid) || 50) / 50);
-                duplicateRequest(count, 1000);
-            }
-            if (cmd === "!getEnergy" && uid) {
-                var count = parseInt(uid) || 1
                 duplicateRequest(count, 1000);
             }
 
