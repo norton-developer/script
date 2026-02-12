@@ -529,14 +529,29 @@ function randomAppearance(config, ms) {
     }, ms);
     comboTimers.push(t);
 }
-var loadConfigsAddr = get_func("_ZN20AvatarClothesManager11loadConfigsEv");
-if (loadConfigsAddr) {
-    Interceptor.replace(loadConfigsAddr, new NativeCallback(function(thisPtr) {
-        // Эта функция вызывается ВМЕСТО оригинала
-        // Оригинальный код loadConfigs() НЕ выполняется
-        console.log("[BLOCKED] loadConfigs — original code NEVER runs");
-        return; // просто выходим
-    }, 'void', ['pointer']));
+// =========================================================
+// BYPASS DRESSCODE — всегда возвращаем "разрешено"
+// =========================================================
+
+// Способ 1: Replace — функция всегда возвращает 1
+var mapCheckAddr = get_func("_ZN10MapManager14checkDresscodeEv");
+if (!mapCheckAddr) {
+    // Ищем через паттерн
+    var exports = Module.enumerateExportsSync(moduleName);
+    for (var i = 0; i < exports.length; i++) {
+        if (exports[i].name.indexOf("MapManager") !== -1 && 
+            exports[i].name.indexOf("checkDresscode") !== -1) {
+            mapCheckAddr = exports[i].address;
+            break;
+        }
+    }
+}
+
+if (mapCheckAddr) {
+    Interceptor.replace(mapCheckAddr, new NativeCallback(function(a1, a2, a3, a4) {
+        return 1; // Всегда разрешено
+    }, 'uint32', ['pointer', 'pointer', 'pointer', 'pointer']));
+    console.log("[+] MapManager::checkDresscode BYPASSED");
 }
 // =========================================================
 // НАЧИНАЕМ ХУКИ
@@ -922,4 +937,4 @@ console.log("  !guitar / !dj / !cyber");
 console.log("  !follow ID      — follow player");
 console.log("===============================================\n");
 
-} // конец initScriptнец initScript
+} // конец initScriptц initScriptнец initScript
