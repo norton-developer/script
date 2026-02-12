@@ -922,5 +922,4 @@ console.log("  !guitar / !dj / !cyber");
 console.log("  !follow ID      — follow player");
 console.log("===============================================\n");
 
-} // конец initScript
-} // конец initScript
+} // конец initScriptнец initScript
