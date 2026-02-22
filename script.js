@@ -1,187 +1,198 @@
-Java.perform(function () {
-    console.log("[BloodMoon] Загрузка...");
+Java.perform(function() {
+    console.log("[BM] Старт на Android 14");
 
-    var context = null;
-    var wm = null;
-    var menuView = null;
-    var rightPanel = null;
-    var currentCat = null;
+    // Состояние фич
+    var Features = {
+        godMode: false,
+        speedHack: false,
+        flyCar: false,
+        infiniteAmmo: false,
+        noReload: false,
+        rapidFire: false,
+        superJump: false,
+        noClip: false,
+        freezeBots: false,
+        esp: false,
+        antiBan: false,
+        unlockAll: false
+    };
 
     // ==========================================
-    // ПОЛУЧЕНИЕ КОНТЕКСТА И WINDOW MANAGER
+    // ХУКАЕМ Activity.onResume - безопасный вход в UI
     // ==========================================
-    function getContext() {
-        try {
-            var ActivityThread = Java.use('android.app.ActivityThread');
-            var app = ActivityThread.currentApplication();
-            if (app) {
-                context = app.getApplicationContext();
-                console.log("[BloodMoon] Контекст получен: " + context);
-                return true;
+    var Activity = Java.use('android.app.Activity');
+    
+    Activity.onResume.implementation = function() {
+        this.onResume();
+        
+        var activity = this;
+        console.log("[BM] onResume: " + activity.getClass().getName());
+        
+        // Запускаем меню через runOnUiThread самой активности
+        activity.runOnUiThread(Java.registerClass({
+            name: 'com.bm.MenuRunnable_' + Date.now(),
+            implements: [Java.use('java.lang.Runnable')],
+            methods: {
+                run: function() {
+                    try {
+                        injectMenu(activity);
+                    } catch(e) {
+                        console.log("[BM] inject error: " + e);
+                    }
+                }
             }
-        } catch(e) {
-            console.log("[BloodMoon] Ошибка контекста: " + e);
-        }
-        return false;
-    }
-
-    function getWindowManager() {
-        try {
-            // ПРАВИЛЬНЫЙ способ получения WindowManager
-            wm = Java.cast(
-                context.getSystemService("window"),
-                Java.use('android.view.WindowManager')
-            );
-            console.log("[BloodMoon] WindowManager получен");
-            return true;
-        } catch(e) {
-            console.log("[BloodMoon] Ошибка WM: " + e);
-        }
-        return false;
-    }
+        }).$new());
+    };
 
     // ==========================================
-    // ЗАПУСК В UI ПОТОКЕ
+    // ИНЖЕКТ МЕНЮ В АКТИВНОСТЬ
     // ==========================================
-    function runOnUiThread(func) {
+    var menuInjected = false;
+
+    function injectMenu(activity) {
+        if (menuInjected) return;
+        menuInjected = true;
+        console.log("[BM] Инжектируем меню...");
+
         try {
-            var Handler = Java.use('android.os.Handler');
-            var Looper = Java.use('android.os.Looper');
-            var handler = Handler.$new(Looper.getMainLooper());
+            var context = activity.getApplicationContext();
             
-            var Runnable = Java.use('java.lang.Runnable');
-            var runnable = Java.registerClass({
-                name: 'com.bloodmoon.UiRunnable_' + Date.now(),
-                implements: [Runnable],
-                methods: {
-                    run: function() {
-                        try {
-                            func();
-                        } catch(e) {
-                            console.log("[BloodMoon] UI ошибка: " + e);
-                        }
-                    }
-                }
-            });
-            handler.post(runnable.$new());
-        } catch(e) {
-            console.log("[BloodMoon] runOnUiThread ошибка: " + e);
-        }
-    }
-
-    // ==========================================
-    // ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
-    // ==========================================
-    function getColor(hex) {
-        return Java.use('android.graphics.Color').parseColor(hex);
-    }
-
-    function argb(a, r, g, b) {
-        return Java.use('android.graphics.Color').argb(a, r, g, b);
-    }
-
-    function getSDK() {
-        return Java.use('android.os.Build$VERSION').SDK_INT.value;
-    }
-
-    function getOverlayType() {
-        // TYPE_APPLICATION_OVERLAY = 2038 (API 26+)
-        // TYPE_PHONE = 2002 (старые версии)
-        return getSDK() >= 26 ? 2038 : 2002;
-    }
-
-    // ==========================================
-    // ПЛАВАЮЩАЯ КНОПКА "BM"
-    // ==========================================
-    function createTriggerButton() {
-        try {
-            var Button = Java.use('android.widget.Button');
-            var WLP = Java.use('android.view.WindowManager$LayoutParams');
-            var Gravity = Java.use('android.view.Gravity');
-            var TypedValue = Java.use('android.util.TypedValue');
-
-            var btn = Button.$new(context);
-            btn.setText("BM");
-            btn.setTextSize(0, 14); // px
-            btn.setTextColor(-1); // белый
-            btn.setBackgroundColor(getColor("#8B0000"));
-            btn.setPadding(10, 10, 10, 10);
-
-            var params = WLP.$new(
-                150,  // width
-                150,  // height
-                getOverlayType(),
-                // FLAG_NOT_FOCUSABLE | FLAG_NOT_TOUCH_MODAL
-                0x00000008 | 0x00000020,
-                -3    // TRANSLUCENT
+            // Получаем декор вью
+            var window = activity.getWindow();
+            var decorView = window.getDecorView();
+            var rootView = Java.cast(
+                decorView,
+                Java.use('android.view.ViewGroup')
             );
 
-            // Правый нижний угол
-            params.gravity.value = 0x55; // RIGHT | BOTTOM = 85
-            params.x.value = 30;
-            params.y.value = 200;
-
-            // OnClickListener для кнопки BM
-            var OnClickListener = Java.use('android.view.View$OnClickListener');
-            var BtnListener = Java.registerClass({
-                name: 'com.bloodmoon.BtnListener',
-                implements: [OnClickListener],
-                methods: {
-                    onClick: function(v) {
-                        runOnUiThread(function() {
-                            toggleMenu();
-                        });
-                    }
-                }
-            });
-            btn.setOnClickListener(BtnListener.$new());
-
-            wm.addView(btn, params);
-            console.log("[BloodMoon] Кнопка BM добавлена!");
+            buildMenu(context, rootView, activity);
+            console.log("[BM] Меню добавлено в DecorView!");
 
         } catch(e) {
-            console.log("[BloodMoon] Ошибка кнопки: " + e);
+            console.log("[BM] injectMenu error: " + e);
             console.log(e.stack);
         }
     }
 
     // ==========================================
-    // СОЗДАНИЕ ПОЛНОГО МЕНЮ
+    // ПОСТРОЕНИЕ МЕНЮ
     // ==========================================
-    function createFullMenu() {
+    var menuContainer = null;
+    var rightPanel = null;
+    var menuVisible = false;
+
+    function buildMenu(ctx, rootView, activity) {
         try {
+            var FrameLayout = Java.use('android.widget.FrameLayout');
             var LinearLayout = Java.use('android.widget.LinearLayout');
             var ScrollView = Java.use('android.widget.ScrollView');
             var Button = Java.use('android.widget.Button');
             var TextView = Java.use('android.widget.TextView');
-            var WLP = Java.use('android.view.WindowManager$LayoutParams');
-            var LLWH = Java.use('android.widget.LinearLayout$LayoutParams');
+            var FrameLP = Java.use('android.widget.FrameLayout$LayoutParams');
+            var LinearLP = Java.use('android.widget.LinearLayout$LayoutParams');
+            var Color = Java.use('android.graphics.Color');
+            var Gravity = Java.use('android.view.Gravity');
+            var View = Java.use('android.view.View');
 
-            // === КОРНЕВОЙ КОНТЕЙНЕР ===
-            var root = LinearLayout.$new(context);
-            root.setOrientation(0); // HORIZONTAL
-            root.setBackgroundColor(argb(245, 15, 15, 15));
+            // === КНОПКА BM (поверх всего) ===
+            var triggerFrame = FrameLayout.$new(ctx);
+            var triggerParams = FrameLP.$new(130, 130);
+            triggerParams.gravity.value = 0x55; // RIGHT | BOTTOM
+            triggerParams.setMargins(0, 0, 20, 200);
+            triggerFrame.setLayoutParams(triggerParams);
 
-            // === ЛЕВАЯ ПАНЕЛЬ (категории) ===
-            var leftParams = LLWH.$new(220, -1); // -1 = MATCH_PARENT
-            var left = LinearLayout.$new(context);
-            left.setOrientation(1); // VERTICAL
-            left.setLayoutParams(leftParams);
-            left.setBackgroundColor(argb(255, 40, 0, 0));
-            left.setPadding(5, 5, 5, 5);
+            var triggerBtn = Button.$new(ctx);
+            triggerBtn.setText("BM");
+            triggerBtn.setTextColor(-1);
+            triggerBtn.setTextSize(0, 14);
+            triggerBtn.setBackgroundColor(Color.parseColor("#8B0000"));
 
-            // Заголовок левой панели
-            var title = TextView.$new(context);
-            title.setText("BloodMoon");
-            title.setTextColor(getColor("#FF4444"));
-            title.setTextSize(0, 16);
-            title.setPadding(10, 15, 10, 15);
-            left.addView(title);
+            var TrigLP = LinearLP.$new(-1, -1);
+            triggerBtn.setLayoutParams(TrigLP);
+
+            // Клик по BM
+            setClick(triggerBtn, 'TriggerBM', function() {
+                toggleMenu(ctx, rootView, activity);
+            });
+
+            triggerFrame.addView(triggerBtn);
+            rootView.addView(triggerFrame);
+
+            console.log("[BM] Кнопка BM добавлена");
+
+        } catch(e) {
+            console.log("[BM] buildMenu error: " + e);
+            console.log(e.stack);
+        }
+    }
+
+    function toggleMenu(ctx, rootView, activity) {
+        try {
+            var View = Java.use('android.view.View');
+            
+            if (!menuContainer) {
+                createMainMenu(ctx, rootView);
+                menuVisible = true;
+            } else {
+                menuVisible = !menuVisible;
+                menuContainer.setVisibility(menuVisible ? 0 : 8);
+            }
+        } catch(e) {
+            console.log("[BM] toggleMenu error: " + e);
+        }
+    }
+
+    function createMainMenu(ctx, rootView) {
+        try {
+            var FrameLayout = Java.use('android.widget.FrameLayout');
+            var LinearLayout = Java.use('android.widget.LinearLayout');
+            var ScrollView = Java.use('android.widget.ScrollView');
+            var Button = Java.use('android.widget.Button');
+            var TextView = Java.use('android.widget.TextView');
+            var FrameLP = Java.use('android.widget.FrameLayout$LayoutParams');
+            var LinearLP = Java.use('android.widget.LinearLayout$LayoutParams');
+            var Color = Java.use('android.graphics.Color');
+
+            // Внешний контейнер (фрейм)
+            var outerFrame = FrameLayout.$new(ctx);
+            var outerParams = FrameLP.$new(650, 850);
+            outerParams.gravity.value = 17; // CENTER
+            outerFrame.setLayoutParams(outerParams);
+            outerFrame.setBackgroundColor(Color.argb(250, 10, 10, 10));
+
+            // Горизонтальный layout (лево + право)
+            var horizontal = LinearLayout.$new(ctx);
+            horizontal.setOrientation(0);
+            horizontal.setLayoutParams(LinearLP.$new(-1, -1));
+
+            // === ЛЕВАЯ ПАНЕЛЬ ===
+            var leftPanel = LinearLayout.$new(ctx);
+            leftPanel.setOrientation(1);
+            var leftLP = LinearLP.$new(200, -1);
+            leftPanel.setLayoutParams(leftLP);
+            leftPanel.setBackgroundColor(Color.argb(255, 35, 0, 0));
+            leftPanel.setPadding(5, 5, 5, 5);
+
+            // Лого
+            var logo = TextView.$new(ctx);
+            logo.setText("🩸 BloodMoon");
+            logo.setTextColor(Color.parseColor("#FF3333"));
+            logo.setTextSize(0, 13);
+            logo.setPadding(8, 12, 8, 12);
+            leftPanel.addView(logo);
+
+            // Разделитель
+            var divider = TextView.$new(ctx);
+            divider.setText("─────────");
+            divider.setTextColor(Color.parseColor("#8B0000"));
+            divider.setTextSize(0, 10);
+            divider.setPadding(5, 2, 5, 8);
+            leftPanel.addView(divider);
 
             // Категории
-            var categories = [
+            var cats = [
                 "Машины",
-                "Персонаж", 
+                "Персонаж",
                 "Перемещение",
                 "Оружие",
                 "Боты",
@@ -189,398 +200,264 @@ Java.perform(function () {
                 "Другое"
             ];
 
-            for (var i = 0; i < categories.length; i++) {
-                (function(catName, index) {
-                    var catBtn = Button.$new(context);
-                    catBtn.setText(catName);
+            for (var i = 0; i < cats.length; i++) {
+                (function(name, idx) {
+                    var catBtn = Button.$new(ctx);
+                    catBtn.setText(name);
                     catBtn.setTextColor(-1);
+                    catBtn.setTextSize(0, 11);
                     catBtn.setBackgroundColor(
-                        index === 0 ? getColor("#8B0000") : 0x00000000
+                        idx === 0 
+                            ? Color.argb(200, 139, 0, 0) 
+                            : Color.argb(100, 60, 0, 0)
                     );
-                    catBtn.setPadding(15, 12, 15, 12);
+                    catBtn.setPadding(10, 10, 10, 10);
 
-                    var catParams = LLWH.$new(-1, -2);
-                    catBtn.setLayoutParams(catParams);
+                    var catLP = LinearLP.$new(-1, -2);
+                    catLP.setMargins(2, 2, 2, 2);
+                    catBtn.setLayoutParams(catLP);
 
-                    var CatOnClick = Java.use('android.view.View$OnClickListener');
-                    var CatListener = Java.registerClass({
-                        name: 'com.bloodmoon.Cat_' + index + '_' + Date.now(),
-                        implements: [CatOnClick],
-                        methods: {
-                            onClick: function(v) {
-                                showCategory(catName);
-                            }
-                        }
+                    setClick(catBtn, 'Cat_' + idx, function() {
+                        showCategory(ctx, name);
                     });
-                    catBtn.setOnClickListener(CatListener.$new());
-                    left.addView(catBtn);
-                })(categories[i], i);
+
+                    leftPanel.addView(catBtn);
+                })(cats[i], i);
             }
 
-            // === ПРАВАЯ ПАНЕЛЬ (контент) ===
-            var rightParams = LLWH.$new(0, -1);
-            rightParams.weight.value = 1;
-
-            var scroll = ScrollView.$new(context);
-            scroll.setLayoutParams(rightParams);
-            scroll.setBackgroundColor(argb(245, 20, 20, 20));
-
-            rightPanel = LinearLayout.$new(context);
-            rightPanel.setOrientation(1); // VERTICAL
-            rightPanel.setPadding(10, 10, 10, 10);
-
-            var rpParams = LLWH.$new(-1, -2);
-            rightPanel.setLayoutParams(rpParams);
-            scroll.addView(rightPanel);
-
-            // Кнопка закрытия (X)
-            var closeBtn = Button.$new(context);
+            // Кнопка закрыть
+            var closeBtn = Button.$new(ctx);
             closeBtn.setText("✕ Закрыть");
             closeBtn.setTextColor(-1);
-            closeBtn.setBackgroundColor(getColor("#8B0000"));
-            closeBtn.setPadding(10, 8, 10, 8);
+            closeBtn.setTextSize(0, 11);
+            closeBtn.setBackgroundColor(Color.parseColor("#8B0000"));
+            closeBtn.setPadding(10, 10, 10, 10);
 
-            var CloseOnClick = Java.use('android.view.View$OnClickListener');
-            var CloseListener = Java.registerClass({
-                name: 'com.bloodmoon.CloseListener',
-                implements: [CloseOnClick],
-                methods: {
-                    onClick: function(v) {
-                        toggleMenu();
-                    }
-                }
+            var closeLP = LinearLP.$new(-1, -2);
+            closeLP.setMargins(2, 10, 2, 2);
+            closeBtn.setLayoutParams(closeLP);
+
+            setClick(closeBtn, 'CloseMenu', function() {
+                menuVisible = false;
+                outerFrame.setVisibility(8);
             });
-            closeBtn.setOnClickListener(CloseListener.$new());
+            leftPanel.addView(closeBtn);
 
-            // Добавляем в корень
-            root.addView(left);
-            root.addView(scroll);
+            // === ПРАВАЯ ПАНЕЛЬ ===
+            var scroll = ScrollView.$new(ctx);
+            var scrollLP = LinearLP.$new(0, -1);
+            scrollLP.weight.value = 1;
+            scroll.setLayoutParams(scrollLP);
+            scroll.setBackgroundColor(Color.argb(255, 18, 18, 18));
 
-            // === ПАРАМЕТРЫ ОКНА ===
-            var menuParams = WLP.$new(
-                600,  // width
-                800,  // height
-                getOverlayType(),
-                0x00000008 | 0x00000020,
-                -3
-            );
-            menuParams.gravity.value = 17; // CENTER
-            menuParams.x.value = 0;
-            menuParams.y.value = 0;
+            rightPanel = LinearLayout.$new(ctx);
+            rightPanel.setOrientation(1);
+            rightPanel.setPadding(8, 8, 8, 8);
+            rightPanel.setLayoutParams(LinearLP.$new(-1, -2));
+            scroll.addView(rightPanel);
 
-            wm.addView(root, menuParams);
-            menuView = root;
+            // Сборка
+            horizontal.addView(leftPanel);
+            horizontal.addView(scroll);
+            outerFrame.addView(horizontal);
 
-            // Загружаем дефолтную категорию
-            showCategory("Машины");
-            console.log("[BloodMoon] Меню создано!");
+            rootView.addView(outerFrame);
+            menuContainer = outerFrame;
+
+            // Загружаем первую категорию
+            showCategory(ctx, "Машины");
 
         } catch(e) {
-            console.log("[BloodMoon] Ошибка меню: " + e);
+            console.log("[BM] createMainMenu error: " + e);
             console.log(e.stack);
         }
     }
 
     // ==========================================
-    // ОТОБРАЖЕНИЕ КАТЕГОРИИ
+    // ПОКАЗ КАТЕГОРИИ
     // ==========================================
-    function showCategory(cat) {
+    var currentCat = "";
+
+    function showCategory(ctx, cat) {
         if (!rightPanel) return;
         if (currentCat === cat) return;
         currentCat = cat;
 
         try {
             rightPanel.removeAllViews();
-            
+
             var TextView = Java.use('android.widget.TextView');
-            var header = TextView.$new(context);
+            var LinearLP = Java.use('android.widget.LinearLayout$LayoutParams');
+            var Color = Java.use('android.graphics.Color');
+
+            // Заголовок
+            var header = TextView.$new(ctx);
             header.setText("— " + cat + " —");
-            header.setTextColor(getColor("#FF4444"));
-            header.setTextSize(0, 18);
-            header.setPadding(5, 10, 5, 15);
+            header.setTextColor(Color.parseColor("#FF4444"));
+            header.setTextSize(0, 15);
+            header.setPadding(5, 8, 5, 12);
             rightPanel.addView(header);
 
-            // Получаем фичи для категории
-            var features = getFeatures(cat);
-            for (var i = 0; i < features.length; i++) {
-                addFeatureButton(features[i]);
+            // Фичи
+            var feats = getFeatures(cat);
+            for (var i = 0; i < feats.length; i++) {
+                addToggleButton(ctx, feats[i]);
             }
 
-            console.log("[BloodMoon] Категория: " + cat);
         } catch(e) {
-            console.log("[BloodMoon] Ошибка категории: " + e);
+            console.log("[BM] showCategory error: " + e);
         }
     }
 
     // ==========================================
-    // ДОБАВЛЕНИЕ КНОПКИ ФИЧИ
+    // КНОПКА ФИЧИ
     // ==========================================
-    function addFeatureButton(feature) {
+    function addToggleButton(ctx, feat) {
         try {
-            var LinearLayout = Java.use('android.widget.LinearLayout');
-            var LLWH = Java.use('android.widget.LinearLayout$LayoutParams');
             var Button = Java.use('android.widget.Button');
+            var LinearLP = Java.use('android.widget.LinearLayout$LayoutParams');
+            var Color = Java.use('android.graphics.Color');
 
-            var btn = Button.$new(context);
-            btn.setText((feature.enabled ? "✓ " : "✗ ") + feature.name);
-            btn.setTextColor(feature.enabled ? getColor("#00FF44") : getColor("#FF4444"));
+            var btn = Button.$new(ctx);
+            updateBtnState(btn, feat);
+
+            var lp = LinearLP.$new(-1, -2);
+            lp.setMargins(2, 3, 2, 3);
+            btn.setLayoutParams(lp);
+            btn.setPadding(12, 10, 12, 10);
+            btn.setTextSize(0, 11);
+
+            setClick(btn, 'Feat_' + feat.key + '_' + Date.now(), function() {
+                Features[feat.key] = !Features[feat.key];
+                feat.enabled = Features[feat.key];
+                updateBtnState(btn, feat);
+                if (feat.onToggle) feat.onToggle(feat.enabled);
+                console.log("[BM] " + feat.name + ": " + feat.enabled);
+            });
+
+            rightPanel.addView(btn);
+        } catch(e) {
+            console.log("[BM] addToggleButton error: " + e);
+        }
+    }
+
+    function updateBtnState(btn, feat) {
+        try {
+            var Color = Java.use('android.graphics.Color');
+            var on = feat.enabled;
+            btn.setText((on ? "✓  " : "✗  ") + feat.name);
+            btn.setTextColor(on ? Color.parseColor("#00FF66") : Color.parseColor("#FF4444"));
             btn.setBackgroundColor(
-                feature.enabled ? argb(180, 0, 100, 0) : argb(180, 80, 0, 0)
+                on ? Color.argb(200, 0, 100, 30) : Color.argb(200, 80, 0, 0)
             );
-            btn.setPadding(15, 12, 15, 12);
+        } catch(e) {}
+    }
 
-            var params = LLWH.$new(-1, -2);
-            params.setMargins(0, 4, 0, 4);
-            btn.setLayoutParams(params);
-
-            var FeatureClick = Java.use('android.view.View$OnClickListener');
-            var featureName = feature.name;
-            var featureCallback = feature.callback;
-            
-            var FeatureListener = Java.registerClass({
-                name: 'com.bloodmoon.Feat_' + featureName.replace(/\s/g, '_') + '_' + Date.now(),
-                implements: [FeatureClick],
-                methods: {
-                    onClick: function(v) {
-                        feature.enabled = !feature.enabled;
-                        // Обновляем кнопку
-                        var jBtn = Java.cast(v, Button);
-                        jBtn.setText((feature.enabled ? "✓ " : "✗ ") + featureName);
-                        jBtn.setTextColor(
-                            feature.enabled ? getColor("#00FF44") : getColor("#FF4444")
-                        );
-                        jBtn.setBackgroundColor(
-                            feature.enabled ? argb(180, 0, 100, 0) : argb(180, 80, 0, 0)
-                        );
-                        // Вызываем callback
-                        if (featureCallback) {
-                            featureCallback(feature.enabled);
-                        }
+    // ==========================================
+    // HELPER: setClick без дублирования имён
+    // ==========================================
+    var clickCounter = 0;
+    function setClick(view, name, callback) {
+        clickCounter++;
+        var OnClick = Java.use('android.view.View$OnClickListener');
+        var Listener = Java.registerClass({
+            name: 'com.bm.' + name + '_' + clickCounter,
+            implements: [OnClick],
+            methods: {
+                onClick: function(v) {
+                    try { callback(); } catch(e) {
+                        console.log("[BM] click error: " + e);
                     }
                 }
-            });
-            btn.setOnClickListener(FeatureListener.$new());
-            rightPanel.addView(btn);
-
-        } catch(e) {
-            console.log("[BloodMoon] Ошибка кнопки фичи: " + e);
-        }
+            }
+        });
+        view.setOnClickListener(Listener.$new());
     }
 
     // ==========================================
-    // ФИЧИ ПО КАТЕГОРИЯМ
+    // ФИЧИ + РЕАЛЬНЫЕ ХУКИ
     // ==========================================
     function getFeatures(cat) {
-        var features = {
-
+        var all = {
             "Машины": [
-                {
-                    name: "Fly Car",
-                    enabled: false,
-                    callback: function(state) {
-                        console.log("[BloodMoon] Fly Car: " + state);
-                        // Твой хук здесь
-                    }
-                },
-                {
-                    name: "God Mode Car",
-                    enabled: false,
-                    callback: function(state) {
-                        console.log("[BloodMoon] God Mode Car: " + state);
-                    }
-                },
-                {
-                    name: "Speed Boost",
-                    enabled: false,
-                    callback: function(state) {
-                        console.log("[BloodMoon] Speed Boost: " + state);
-                    }
-                },
-                {
-                    name: "No Damage",
-                    enabled: false,
-                    callback: function(state) {
-                        console.log("[BloodMoon] No Damage: " + state);
-                    }
-                }
+                { key: "flyCar",    name: "Fly Car",     enabled: false, onToggle: hook_FlyCar },
+                { key: "godMode",   name: "God Car",     enabled: false, onToggle: hook_GodCar },
+                { key: "speedHack", name: "Speed x5",    enabled: false, onToggle: hook_Speed  }
             ],
-
             "Персонаж": [
-                {
-                    name: "God Mode",
-                    enabled: false,
-                    callback: function(state) {
-                        console.log("[BloodMoon] God Mode: " + state);
-                    }
-                },
-                {
-                    name: "Infinite HP",
-                    enabled: false,
-                    callback: function(state) {
-                        console.log("[BloodMoon] Infinite HP: " + state);
-                    }
-                },
-                {
-                    name: "No Ragdoll",
-                    enabled: false,
-                    callback: function(state) {
-                        console.log("[BloodMoon] No Ragdoll: " + state);
-                    }
-                }
+                { key: "godMode",      name: "God Mode",    enabled: false, onToggle: hook_GodMode },
+                { key: "infiniteAmmo", name: "Inf HP",      enabled: false, onToggle: hook_InfHP   }
             ],
-
             "Перемещение": [
-                {
-                    name: "Speed Hack",
-                    enabled: false,
-                    callback: function(state) {
-                        console.log("[BloodMoon] Speed Hack: " + state);
-                    }
-                },
-                {
-                    name: "Super Jump",
-                    enabled: false,
-                    callback: function(state) {
-                        console.log("[BloodMoon] Super Jump: " + state);
-                    }
-                },
-                {
-                    name: "No Clip",
-                    enabled: false,
-                    callback: function(state) {
-                        console.log("[BloodMoon] No Clip: " + state);
-                    }
-                },
-                {
-                    name: "Fly Mode",
-                    enabled: false,
-                    callback: function(state) {
-                        console.log("[BloodMoon] Fly Mode: " + state);
-                    }
-                }
+                { key: "speedHack", name: "Speed Hack",  enabled: false, onToggle: hook_Speed    },
+                { key: "superJump", name: "Super Jump",  enabled: false, onToggle: hook_Jump     },
+                { key: "noClip",    name: "No Clip",     enabled: false, onToggle: hook_NoClip   }
             ],
-
             "Оружие": [
-                {
-                    name: "Infinite Ammo",
-                    enabled: false,
-                    callback: function(state) {
-                        console.log("[BloodMoon] Infinite Ammo: " + state);
-                    }
-                },
-                {
-                    name: "No Reload",
-                    enabled: false,
-                    callback: function(state) {
-                        console.log("[BloodMoon] No Reload: " + state);
-                    }
-                },
-                {
-                    name: "Rapid Fire",
-                    enabled: false,
-                    callback: function(state) {
-                        console.log("[BloodMoon] Rapid Fire: " + state);
-                    }
-                }
+                { key: "infiniteAmmo", name: "Inf Ammo",  enabled: false, onToggle: hook_Ammo    },
+                { key: "noReload",     name: "No Reload", enabled: false, onToggle: hook_Reload  },
+                { key: "rapidFire",    name: "Rapid Fire",enabled: false, onToggle: hook_Rapid   }
             ],
-
             "Боты": [
-                {
-                    name: "Freeze Bots",
-                    enabled: false,
-                    callback: function(state) {
-                        console.log("[BloodMoon] Freeze Bots: " + state);
-                    }
-                },
-                {
-                    name: "Delete Bots",
-                    enabled: false,
-                    callback: function(state) {
-                        console.log("[BloodMoon] Delete Bots: " + state);
-                    }
-                }
+                { key: "freezeBots", name: "Freeze Bots", enabled: false, onToggle: hook_Freeze  }
             ],
-
             "Визуал": [
-                {
-                    name: "ESP / Wallhack",
-                    enabled: false,
-                    callback: function(state) {
-                        console.log("[BloodMoon] ESP: " + state);
-                    }
-                },
-                {
-                    name: "No Fog",
-                    enabled: false,
-                    callback: function(state) {
-                        console.log("[BloodMoon] No Fog: " + state);
-                    }
-                }
+                { key: "esp", name: "ESP", enabled: false, onToggle: hook_ESP }
             ],
-
             "Другое": [
-                {
-                    name: "Unlock All",
-                    enabled: false,
-                    callback: function(state) {
-                        console.log("[BloodMoon] Unlock All: " + state);
-                    }
-                },
-                {
-                    name: "Anti Ban",
-                    enabled: false,
-                    callback: function(state) {
-                        console.log("[BloodMoon] Anti Ban: " + state);
-                    }
-                }
+                { key: "antiBan",   name: "Anti Ban",   enabled: false, onToggle: hook_AntiBan  },
+                { key: "unlockAll", name: "Unlock All", enabled: false, onToggle: hook_Unlock   }
             ]
         };
-
-        return features[cat] || [];
+        return all[cat] || [];
     }
 
     // ==========================================
-    // ПЕРЕКЛЮЧЕНИЕ МЕНЮ
+    // ХУКИ ФИЧ (заглушки - замени на свои)
     // ==========================================
-    function toggleMenu() {
-        try {
-            if (!menuView) {
-                createFullMenu();
-            } else {
-                var VISIBLE = 0;
-                var GONE = 8;
-                var vis = menuView.getVisibility();
-                menuView.setVisibility(vis === VISIBLE ? GONE : VISIBLE);
-            }
-        } catch(e) {
-            console.log("[BloodMoon] toggleMenu ошибка: " + e);
-        }
+    function hook_FlyCar(state) {
+        console.log("[BM] Fly Car = " + state);
+        // Java.use("твой.класс").метод.implementation = ...
+    }
+    function hook_GodCar(state) {
+        console.log("[BM] God Car = " + state);
+    }
+    function hook_Speed(state) {
+        console.log("[BM] Speed = " + state);
+    }
+    function hook_GodMode(state) {
+        console.log("[BM] God Mode = " + state);
+    }
+    function hook_InfHP(state) {
+        console.log("[BM] Inf HP = " + state);
+    }
+    function hook_Jump(state) {
+        console.log("[BM] Super Jump = " + state);
+    }
+    function hook_NoClip(state) {
+        console.log("[BM] No Clip = " + state);
+    }
+    function hook_Ammo(state) {
+        console.log("[BM] Inf Ammo = " + state);
+    }
+    function hook_Reload(state) {
+        console.log("[BM] No Reload = " + state);
+    }
+    function hook_Rapid(state) {
+        console.log("[BM] Rapid Fire = " + state);
+    }
+    function hook_Freeze(state) {
+        console.log("[BM] Freeze Bots = " + state);
+    }
+    function hook_ESP(state) {
+        console.log("[BM] ESP = " + state);
+    }
+    function hook_AntiBan(state) {
+        console.log("[BM] Anti Ban = " + state);
+    }
+    function hook_Unlock(state) {
+        console.log("[BM] Unlock All = " + state);
     }
 
-    // ==========================================
-    // СТАРТ
-    // ==========================================
-    setTimeout(function() {
-        try {
-            if (!getContext()) {
-                console.log("[BloodMoon] ОШИБКА: Контекст не получен!");
-                return;
-            }
-            if (!getWindowManager()) {
-                console.log("[BloodMoon] ОШИБКА: WindowManager не получен!");
-                return;
-            }
-
-            // Запуск UI в главном потоке
-            runOnUiThread(function() {
-                createTriggerButton();
-                console.log("[BloodMoon] Готово! Нажми кнопку BM");
-            });
-
-        } catch(e) {
-            console.log("[BloodMoon] Ошибка старта: " + e);
-            console.log(e.stack);
-        }
-    }, 3000);
-
+    console.log("[BM] Хуки установлены, ждём Activity...");
 });
