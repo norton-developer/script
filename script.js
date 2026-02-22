@@ -1,43 +1,52 @@
-Java.perform(function() {
-    console.log("[BM] Старт на Android 14");
+// =====================================================
+// BLOODMOON MOD MENU — UI поверх игры (Android 14)
+// Инжектируется через Activity.onResume в DecorView
+// =====================================================
 
-    // Состояние фич
-    var Features = {
-        godMode: false,
-        speedHack: false,
-        flyCar: false,
-        infiniteAmmo: false,
-        noReload: false,
-        rapidFire: false,
-        superJump: false,
-        noClip: false,
-        freezeBots: false,
-        esp: false,
-        antiBan: false,
-        unlockAll: false
+Java.perform(function() {
+    console.log("[BM-UI] Запуск UI меню...");
+
+    // ==========================================
+    // СОСТОЯНИЕ — синхронизируется с native скриптом
+    // через глобальные переменные
+    // ==========================================
+    var State = {
+        // Читается из native скрипта через global.*
+        getSilent:    function() { try { return global.SILENT_COMMAND || ""; } catch(e) { return ""; } },
+        getTP:        function() { try { return global.TP_COMMAND || ""; } catch(e) { return ""; } },
+        getProcessor: function() { try { return !!global.globalProcessor; } catch(e) { return false; } },
+        getRoom:      function() { try { return global.currentRoomId || "?"; } catch(e) { return "?"; } },
+        getMyId:      function() { try { return global.myPlayerId || "?"; } catch(e) { return "?"; } },
+        getZoneKick:  function() { try { return !!global.zoneKickActive; } catch(e) { return false; } }
     };
 
+    var menuContainer = null;
+    var rightPanel = null;
+    var menuVisible = false;
+    var currentCat = "";
+    var clickCounter = 0;
+
     // ==========================================
-    // ХУКАЕМ Activity.onResume - безопасный вход в UI
+    // ХУКИ ACTIVITY — вход в UI поток
     // ==========================================
     var Activity = Java.use('android.app.Activity');
-    
+    var injected = false;
+
     Activity.onResume.implementation = function() {
         this.onResume();
-        
-        var activity = this;
-        console.log("[BM] onResume: " + activity.getClass().getName());
-        
-        // Запускаем меню через runOnUiThread самой активности
-        activity.runOnUiThread(Java.registerClass({
-            name: 'com.bm.MenuRunnable_' + Date.now(),
+        if (injected) return;
+        var act = this;
+
+        act.runOnUiThread(Java.registerClass({
+            name: 'com.bm.Inject_' + Date.now(),
             implements: [Java.use('java.lang.Runnable')],
             methods: {
                 run: function() {
                     try {
-                        injectMenu(activity);
+                        buildOverlay(act);
+                        injected = true;
                     } catch(e) {
-                        console.log("[BM] inject error: " + e);
+                        console.log("[BM-UI] inject error: " + e);
                     }
                 }
             }
@@ -45,328 +54,687 @@ Java.perform(function() {
     };
 
     // ==========================================
-    // ИНЖЕКТ МЕНЮ В АКТИВНОСТЬ
+    // ПОСТРОЕНИЕ OVERLAY ЧЕРЕЗ DECORVIEW
     // ==========================================
-    var menuInjected = false;
+    function buildOverlay(activity) {
+        var ctx = activity.getApplicationContext();
+        var decorView = Java.cast(
+            activity.getWindow().getDecorView(),
+            Java.use('android.view.ViewGroup')
+        );
 
-    function injectMenu(activity) {
-        if (menuInjected) return;
-        menuInjected = true;
-        console.log("[BM] Инжектируем меню...");
+        var Color   = Java.use('android.graphics.Color');
+        var FrameLP = Java.use('android.widget.FrameLayout$LayoutParams');
+        var LinearLP = Java.use('android.widget.LinearLayout$LayoutParams');
+        var FrameLayout = Java.use('android.widget.FrameLayout');
+        var Button = Java.use('android.widget.Button');
 
-        try {
-            var context = activity.getApplicationContext();
-            
-            // Получаем декор вью
-            var window = activity.getWindow();
-            var decorView = window.getDecorView();
-            var rootView = Java.cast(
-                decorView,
-                Java.use('android.view.ViewGroup')
-            );
+        // === КНОПКА BM ===
+        var trigFrame = FrameLayout.$new(ctx);
+        var trigParams = FrameLP.$new(120, 120);
+        trigParams.gravity.value = 0x55; // RIGHT | BOTTOM
+        trigParams.setMargins(0, 0, 16, 180);
+        trigFrame.setLayoutParams(trigParams);
+        trigFrame.setBackgroundColor(0x00000000);
 
-            buildMenu(context, rootView, activity);
-            console.log("[BM] Меню добавлено в DecorView!");
+        var trigBtn = Button.$new(ctx);
+        trigBtn.setText("BM");
+        trigBtn.setTextColor(-1);
+        trigBtn.setTextSize(0, 13);
+        trigBtn.setBackgroundColor(Color.parseColor("#8B0000"));
+        trigBtn.setLayoutParams(LinearLP.$new(-1, -1));
 
-        } catch(e) {
-            console.log("[BM] injectMenu error: " + e);
-            console.log(e.stack);
-        }
-    }
-
-    // ==========================================
-    // ПОСТРОЕНИЕ МЕНЮ
-    // ==========================================
-    var menuContainer = null;
-    var rightPanel = null;
-    var menuVisible = false;
-
-    function buildMenu(ctx, rootView, activity) {
-        try {
-            var FrameLayout = Java.use('android.widget.FrameLayout');
-            var LinearLayout = Java.use('android.widget.LinearLayout');
-            var ScrollView = Java.use('android.widget.ScrollView');
-            var Button = Java.use('android.widget.Button');
-            var TextView = Java.use('android.widget.TextView');
-            var FrameLP = Java.use('android.widget.FrameLayout$LayoutParams');
-            var LinearLP = Java.use('android.widget.LinearLayout$LayoutParams');
-            var Color = Java.use('android.graphics.Color');
-            var Gravity = Java.use('android.view.Gravity');
-            var View = Java.use('android.view.View');
-
-            // === КНОПКА BM (поверх всего) ===
-            var triggerFrame = FrameLayout.$new(ctx);
-            var triggerParams = FrameLP.$new(130, 130);
-            triggerParams.gravity.value = 0x55; // RIGHT | BOTTOM
-            triggerParams.setMargins(0, 0, 20, 200);
-            triggerFrame.setLayoutParams(triggerParams);
-
-            var triggerBtn = Button.$new(ctx);
-            triggerBtn.setText("BM");
-            triggerBtn.setTextColor(-1);
-            triggerBtn.setTextSize(0, 14);
-            triggerBtn.setBackgroundColor(Color.parseColor("#8B0000"));
-
-            var TrigLP = LinearLP.$new(-1, -1);
-            triggerBtn.setLayoutParams(TrigLP);
-
-            // Клик по BM
-            setClick(triggerBtn, 'TriggerBM', function() {
-                toggleMenu(ctx, rootView, activity);
-            });
-
-            triggerFrame.addView(triggerBtn);
-            rootView.addView(triggerFrame);
-
-            console.log("[BM] Кнопка BM добавлена");
-
-        } catch(e) {
-            console.log("[BM] buildMenu error: " + e);
-            console.log(e.stack);
-        }
-    }
-
-    function toggleMenu(ctx, rootView, activity) {
-        try {
-            var View = Java.use('android.view.View');
-            
+        onClick(trigBtn, 'TrigBM', function() {
             if (!menuContainer) {
-                createMainMenu(ctx, rootView);
+                buildMenu(ctx, decorView);
                 menuVisible = true;
             } else {
                 menuVisible = !menuVisible;
                 menuContainer.setVisibility(menuVisible ? 0 : 8);
             }
-        } catch(e) {
-            console.log("[BM] toggleMenu error: " + e);
-        }
-    }
+        });
 
-    function createMainMenu(ctx, rootView) {
-        try {
-            var FrameLayout = Java.use('android.widget.FrameLayout');
-            var LinearLayout = Java.use('android.widget.LinearLayout');
-            var ScrollView = Java.use('android.widget.ScrollView');
-            var Button = Java.use('android.widget.Button');
-            var TextView = Java.use('android.widget.TextView');
-            var FrameLP = Java.use('android.widget.FrameLayout$LayoutParams');
-            var LinearLP = Java.use('android.widget.LinearLayout$LayoutParams');
-            var Color = Java.use('android.graphics.Color');
-
-            // Внешний контейнер (фрейм)
-            var outerFrame = FrameLayout.$new(ctx);
-            var outerParams = FrameLP.$new(650, 850);
-            outerParams.gravity.value = 17; // CENTER
-            outerFrame.setLayoutParams(outerParams);
-            outerFrame.setBackgroundColor(Color.argb(250, 10, 10, 10));
-
-            // Горизонтальный layout (лево + право)
-            var horizontal = LinearLayout.$new(ctx);
-            horizontal.setOrientation(0);
-            horizontal.setLayoutParams(LinearLP.$new(-1, -1));
-
-            // === ЛЕВАЯ ПАНЕЛЬ ===
-            var leftPanel = LinearLayout.$new(ctx);
-            leftPanel.setOrientation(1);
-            var leftLP = LinearLP.$new(200, -1);
-            leftPanel.setLayoutParams(leftLP);
-            leftPanel.setBackgroundColor(Color.argb(255, 35, 0, 0));
-            leftPanel.setPadding(5, 5, 5, 5);
-
-            // Лого
-            var logo = TextView.$new(ctx);
-            logo.setText("🩸 BloodMoon");
-            logo.setTextColor(Color.parseColor("#FF3333"));
-            logo.setTextSize(0, 13);
-            logo.setPadding(8, 12, 8, 12);
-            leftPanel.addView(logo);
-
-            // Разделитель
-            var divider = TextView.$new(ctx);
-            divider.setText("─────────");
-            divider.setTextColor(Color.parseColor("#8B0000"));
-            divider.setTextSize(0, 10);
-            divider.setPadding(5, 2, 5, 8);
-            leftPanel.addView(divider);
-
-            // Категории
-            var cats = [
-                "Машины",
-                "Персонаж",
-                "Перемещение",
-                "Оружие",
-                "Боты",
-                "Визуал",
-                "Другое"
-            ];
-
-            for (var i = 0; i < cats.length; i++) {
-                (function(name, idx) {
-                    var catBtn = Button.$new(ctx);
-                    catBtn.setText(name);
-                    catBtn.setTextColor(-1);
-                    catBtn.setTextSize(0, 11);
-                    catBtn.setBackgroundColor(
-                        idx === 0 
-                            ? Color.argb(200, 139, 0, 0) 
-                            : Color.argb(100, 60, 0, 0)
-                    );
-                    catBtn.setPadding(10, 10, 10, 10);
-
-                    var catLP = LinearLP.$new(-1, -2);
-                    catLP.setMargins(2, 2, 2, 2);
-                    catBtn.setLayoutParams(catLP);
-
-                    setClick(catBtn, 'Cat_' + idx, function() {
-                        showCategory(ctx, name);
-                    });
-
-                    leftPanel.addView(catBtn);
-                })(cats[i], i);
-            }
-
-            // Кнопка закрыть
-            var closeBtn = Button.$new(ctx);
-            closeBtn.setText("✕ Закрыть");
-            closeBtn.setTextColor(-1);
-            closeBtn.setTextSize(0, 11);
-            closeBtn.setBackgroundColor(Color.parseColor("#8B0000"));
-            closeBtn.setPadding(10, 10, 10, 10);
-
-            var closeLP = LinearLP.$new(-1, -2);
-            closeLP.setMargins(2, 10, 2, 2);
-            closeBtn.setLayoutParams(closeLP);
-
-            setClick(closeBtn, 'CloseMenu', function() {
-                menuVisible = false;
-                outerFrame.setVisibility(8);
-            });
-            leftPanel.addView(closeBtn);
-
-            // === ПРАВАЯ ПАНЕЛЬ ===
-            var scroll = ScrollView.$new(ctx);
-            var scrollLP = LinearLP.$new(0, -1);
-            scrollLP.weight.value = 1;
-            scroll.setLayoutParams(scrollLP);
-            scroll.setBackgroundColor(Color.argb(255, 18, 18, 18));
-
-            rightPanel = LinearLayout.$new(ctx);
-            rightPanel.setOrientation(1);
-            rightPanel.setPadding(8, 8, 8, 8);
-            rightPanel.setLayoutParams(LinearLP.$new(-1, -2));
-            scroll.addView(rightPanel);
-
-            // Сборка
-            horizontal.addView(leftPanel);
-            horizontal.addView(scroll);
-            outerFrame.addView(horizontal);
-
-            rootView.addView(outerFrame);
-            menuContainer = outerFrame;
-
-            // Загружаем первую категорию
-            showCategory(ctx, "Машины");
-
-        } catch(e) {
-            console.log("[BM] createMainMenu error: " + e);
-            console.log(e.stack);
-        }
+        trigFrame.addView(trigBtn);
+        decorView.addView(trigFrame);
+        console.log("[BM-UI] Кнопка BM добавлена!");
     }
 
     // ==========================================
-    // ПОКАЗ КАТЕГОРИИ
+    // ГЛАВНОЕ МЕНЮ
     // ==========================================
-    var currentCat = "";
+    function buildMenu(ctx, root) {
+        var Color    = Java.use('android.graphics.Color');
+        var FrameLP  = Java.use('android.widget.FrameLayout$LayoutParams');
+        var LinearLP = Java.use('android.widget.LinearLayout$LayoutParams');
+        var FrameLayout  = Java.use('android.widget.FrameLayout');
+        var LinearLayout = Java.use('android.widget.LinearLayout');
+        var ScrollView   = Java.use('android.widget.ScrollView');
+        var TextView     = Java.use('android.widget.TextView');
+        var Button       = Java.use('android.widget.Button');
 
-    function showCategory(ctx, cat) {
-        if (!rightPanel) return;
-        if (currentCat === cat) return;
+        // Внешний контейнер
+        var outer = FrameLayout.$new(ctx);
+        var outerLP = FrameLP.$new(680, 860);
+        outerLP.gravity.value = 17; // CENTER
+        outer.setLayoutParams(outerLP);
+        outer.setBackgroundColor(Color.argb(250, 10, 10, 10));
+
+        // Горизонтальная раскладка
+        var horiz = LinearLayout.$new(ctx);
+        horiz.setOrientation(0); // HORIZONTAL
+        horiz.setLayoutParams(LinearLP.$new(-1, -1));
+
+        // === ЛЕВАЯ ПАНЕЛЬ ===
+        var left = LinearLayout.$new(ctx);
+        left.setOrientation(1);
+        left.setLayoutParams(LinearLP.$new(210, -1));
+        left.setBackgroundColor(Color.argb(255, 35, 0, 0));
+        left.setPadding(5, 5, 5, 5);
+
+        // Лого
+        var logo = TextView.$new(ctx);
+        logo.setText("\uD83E\uDE78 BloodMoon");
+        logo.setTextColor(Color.parseColor("#FF3333"));
+        logo.setTextSize(0, 13);
+        logo.setPadding(8, 12, 8, 8);
+        left.addView(logo);
+
+        var sep = TextView.$new(ctx);
+        sep.setText("─────────");
+        sep.setTextColor(Color.parseColor("#8B0000"));
+        sep.setTextSize(0, 9);
+        sep.setPadding(5, 2, 5, 8);
+        left.addView(sep);
+
+        // Категории
+        var cats = [
+            "Анимации",
+            "Silent Action",
+            "Телепорт",
+            "Appearance",
+            "Zone Kick",
+            "Relations",
+            "Другое"
+        ];
+
+        for (var ci = 0; ci < cats.length; ci++) {
+            (function(name, idx) {
+                var btn = Button.$new(ctx);
+                btn.setText(name);
+                btn.setTextColor(-1);
+                btn.setTextSize(0, 10);
+                btn.setBackgroundColor(
+                    idx === 0
+                        ? Color.argb(220, 139, 0, 0)
+                        : Color.argb(100, 60, 0, 0)
+                );
+                btn.setPadding(10, 10, 10, 10);
+                var lp = LinearLP.$new(-1, -2);
+                lp.setMargins(2, 2, 2, 2);
+                btn.setLayoutParams(lp);
+
+                onClick(btn, 'Cat_' + idx, function() {
+                    showCat(ctx, name);
+                });
+                left.addView(btn);
+            })(cats[ci], ci);
+        }
+
+        // Кнопка ЗАКРЫТЬ
+        var closeBtn = Button.$new(ctx);
+        closeBtn.setText("✕ Закрыть");
+        closeBtn.setTextColor(-1);
+        closeBtn.setTextSize(0, 10);
+        closeBtn.setBackgroundColor(Color.parseColor("#8B0000"));
+        closeBtn.setPadding(10, 10, 10, 10);
+        var closeLp = LinearLP.$new(-1, -2);
+        closeLp.setMargins(2, 12, 2, 2);
+        closeBtn.setLayoutParams(closeLp);
+        onClick(closeBtn, 'CloseBtn', function() {
+            menuVisible = false;
+            outer.setVisibility(8);
+        });
+        left.addView(closeBtn);
+
+        // === ПРАВАЯ ПАНЕЛЬ ===
+        var scroll = ScrollView.$new(ctx);
+        var scrollLP = LinearLP.$new(0, -1);
+        scrollLP.weight.value = 1;
+        scroll.setLayoutParams(scrollLP);
+        scroll.setBackgroundColor(Color.argb(255, 18, 18, 18));
+
+        rightPanel = LinearLayout.$new(ctx);
+        rightPanel.setOrientation(1);
+        rightPanel.setPadding(8, 8, 8, 8);
+        rightPanel.setLayoutParams(LinearLP.$new(-1, -2));
+        scroll.addView(rightPanel);
+
+        horiz.addView(left);
+        horiz.addView(scroll);
+        outer.addView(horiz);
+        root.addView(outer);
+
+        menuContainer = outer;
+        showCat(ctx, "Анимации");
+        console.log("[BM-UI] Меню создано!");
+    }
+
+    // ==========================================
+    // ОТОБРАЖЕНИЕ КАТЕГОРИИ
+    // ==========================================
+    function showCat(ctx, cat) {
+        if (!rightPanel || currentCat === cat) return;
         currentCat = cat;
 
-        try {
-            rightPanel.removeAllViews();
+        var Color    = Java.use('android.graphics.Color');
+        var LinearLP = Java.use('android.widget.LinearLayout$LayoutParams');
+        var TextView = Java.use('android.widget.TextView');
+        var Button   = Java.use('android.widget.Button');
 
-            var TextView = Java.use('android.widget.TextView');
-            var LinearLP = Java.use('android.widget.LinearLayout$LayoutParams');
-            var Color = Java.use('android.graphics.Color');
+        rightPanel.removeAllViews();
 
-            // Заголовок
-            var header = TextView.$new(ctx);
-            header.setText("— " + cat + " —");
-            header.setTextColor(Color.parseColor("#FF4444"));
-            header.setTextSize(0, 15);
-            header.setPadding(5, 8, 5, 12);
-            rightPanel.addView(header);
+        // Заголовок
+        var hdr = TextView.$new(ctx);
+        hdr.setText("— " + cat + " —");
+        hdr.setTextColor(Color.parseColor("#FF4444"));
+        hdr.setTextSize(0, 14);
+        hdr.setPadding(5, 8, 5, 12);
+        rightPanel.addView(hdr);
 
-            // Фичи
-            var feats = getFeatures(cat);
-            for (var i = 0; i < feats.length; i++) {
-                addToggleButton(ctx, feats[i]);
-            }
-
-        } catch(e) {
-            console.log("[BM] showCategory error: " + e);
+        // Кнопки категории
+        var items = getCatItems(cat);
+        for (var i = 0; i < items.length; i++) {
+            addItem(ctx, items[i]);
         }
     }
 
     // ==========================================
-    // КНОПКА ФИЧИ
+    // ДОБАВЛЕНИЕ ЭЛЕМЕНТА
     // ==========================================
-    function addToggleButton(ctx, feat) {
-        try {
-            var Button = Java.use('android.widget.Button');
-            var LinearLP = Java.use('android.widget.LinearLayout$LayoutParams');
-            var Color = Java.use('android.graphics.Color');
+    function addItem(ctx, item) {
+        var Color    = Java.use('android.graphics.Color');
+        var LinearLP = Java.use('android.widget.LinearLayout$LayoutParams');
+        var Button   = Java.use('android.widget.Button');
 
+        if (item.type === "button") {
             var btn = Button.$new(ctx);
-            updateBtnState(btn, feat);
-
+            btn.setText(item.label);
+            btn.setTextColor(-1);
+            btn.setTextSize(0, 10);
+            btn.setBackgroundColor(Color.argb(200, 80, 0, 0));
+            btn.setPadding(12, 10, 12, 10);
             var lp = LinearLP.$new(-1, -2);
             lp.setMargins(2, 3, 2, 3);
             btn.setLayoutParams(lp);
-            btn.setPadding(12, 10, 12, 10);
-            btn.setTextSize(0, 11);
-
-            setClick(btn, 'Feat_' + feat.key + '_' + Date.now(), function() {
-                Features[feat.key] = !Features[feat.key];
-                feat.enabled = Features[feat.key];
-                updateBtnState(btn, feat);
-                if (feat.onToggle) feat.onToggle(feat.enabled);
-                console.log("[BM] " + feat.name + ": " + feat.enabled);
+            var cb = item.action;
+            onClick(btn, 'Btn_' + item.label.replace(/\s/g, '_') + '_' + clickCounter, function() {
+                cb();
             });
-
             rightPanel.addView(btn);
-        } catch(e) {
-            console.log("[BM] addToggleButton error: " + e);
+        }
+
+        if (item.type === "toggle") {
+            var tBtn = Button.$new(ctx);
+            var state = { on: item.getState ? item.getState() : false };
+
+            function updateToggle() {
+                state.on = item.getState ? item.getState() : state.on;
+                tBtn.setText((state.on ? "✓  " : "✗  ") + item.label);
+                tBtn.setTextColor(
+                    state.on ? Color.parseColor("#00FF66") : Color.parseColor("#FF4444")
+                );
+                tBtn.setBackgroundColor(
+                    state.on ? Color.argb(200, 0, 100, 30) : Color.argb(200, 80, 0, 0)
+                );
+            }
+
+            updateToggle();
+            tBtn.setTextSize(0, 10);
+            tBtn.setPadding(12, 10, 12, 10);
+            var tlp = LinearLP.$new(-1, -2);
+            tlp.setMargins(2, 3, 2, 3);
+            tBtn.setLayoutParams(tlp);
+
+            var tItem = item;
+            var tState = state;
+            onClick(tBtn, 'Toggle_' + item.label.replace(/\s/g, '_') + '_' + clickCounter, function() {
+                tState.on = !tState.on;
+                if (tItem.action) tItem.action(tState.on);
+                updateToggle();
+            });
+            rightPanel.addView(tBtn);
         }
     }
 
-    function updateBtnState(btn, feat) {
+    // ==========================================
+    // КАТЕГОРИИ И ИХ КНОПКИ
+    // ==========================================
+    function getCatItems(cat) {
+        var items = {
+
+            // ─────────────────────────────────────
+            "Анимации": [
+                {
+                    type: "button",
+                    label: "🎸 Гитара",
+                    action: function() { sendChat("!guitar"); }
+                },
+                {
+                    type: "button",
+                    label: "🤖 КиберТанец",
+                    action: function() { sendChat("!cyber"); }
+                },
+                {
+                    type: "button",
+                    label: "🎧 DJ",
+                    action: function() { sendChat("!dj"); }
+                },
+                {
+                    type: "button",
+                    label: "📋 Статус анимации",
+                    action: function() { sendChat("!status"); }
+                },
+                {
+                    type: "button",
+                    label: "🔁 Дублировать x10",
+                    action: function() { sendChat("!dupe 10"); }
+                },
+                {
+                    type: "button",
+                    label: "🔁 Дублировать x50",
+                    action: function() { sendChat("!dupe 50"); }
+                },
+                {
+                    type: "button",
+                    label: "⏹ Выключить ВСЁ",
+                    action: function() { sendChat("!off"); }
+                }
+            ],
+
+            // ─────────────────────────────────────
+            "Silent Action": [
+                {
+                    type: "toggle",
+                    label: "💋 Поцелуй (подход)",
+                    getState: function() { return State.getSilent() === "r.ks"; },
+                    action: function(on) {
+                        if (on) sendChat("!kiss");
+                        else sendChat("!silentoff");
+                    }
+                },
+                {
+                    type: "toggle",
+                    label: "💋💋 Долгий поцелуй",
+                    getState: function() { return State.getSilent() === "r.kl"; },
+                    action: function(on) {
+                        if (on) sendChat("!kisslong");
+                        else sendChat("!silentoff");
+                    }
+                },
+                {
+                    type: "toggle",
+                    label: "🤗 Обнять",
+                    getState: function() { return State.getSilent() === "r.hg"; },
+                    action: function(on) {
+                        if (on) sendChat("!hug");
+                        else sendChat("!silentoff");
+                    }
+                },
+                {
+                    type: "toggle",
+                    label: "💃 Парный танец",
+                    getState: function() { return State.getSilent() === "r.pd"; },
+                    action: function(on) {
+                        if (on) sendChat("!danceaction");
+                        else sendChat("!silentoff");
+                    }
+                },
+                {
+                    type: "toggle",
+                    label: "🖐 Дай пять",
+                    getState: function() { return State.getSilent() === "r.hf"; },
+                    action: function(on) {
+                        if (on) sendChat("!fiveaction");
+                        else sendChat("!silentoff");
+                    }
+                },
+                {
+                    type: "button",
+                    label: "⏹ Выключить silent",
+                    action: function() { sendChat("!silentoff"); }
+                }
+            ],
+
+            // ─────────────────────────────────────
+            "Телепорт": [
+                {
+                    type: "toggle",
+                    label: "⚡ TP Поцелуй",
+                    getState: function() { return State.getTP() === "r.ks"; },
+                    action: function(on) {
+                        if (on) sendChat("!tpkiss");
+                        else sendChat("!silentoff");
+                    }
+                },
+                {
+                    type: "toggle",
+                    label: "⚡ TP Долгий поцелуй",
+                    getState: function() { return State.getTP() === "r.kl"; },
+                    action: function(on) {
+                        if (on) sendChat("!tpkisslong");
+                        else sendChat("!silentoff");
+                    }
+                },
+                {
+                    type: "toggle",
+                    label: "⚡ TP Обнять",
+                    getState: function() { return State.getTP() === "r.hg"; },
+                    action: function(on) {
+                        if (on) sendChat("!tphug");
+                        else sendChat("!silentoff");
+                    }
+                },
+                {
+                    type: "toggle",
+                    label: "⚡ TP Танец",
+                    getState: function() { return State.getTP() === "r.pd"; },
+                    action: function(on) {
+                        if (on) sendChat("!tpdance");
+                        else sendChat("!silentoff");
+                    }
+                },
+                {
+                    type: "toggle",
+                    label: "⚡ TP Дай пять",
+                    getState: function() { return State.getTP() === "r.hf"; },
+                    action: function(on) {
+                        if (on) sendChat("!tpfive");
+                        else sendChat("!silentoff");
+                    }
+                },
+                {
+                    type: "toggle",
+                    label: "⚡ TP Пнуть",
+                    getState: function() { return State.getTP() === "r.ka"; },
+                    action: function(on) {
+                        if (on) sendChat("!tpkick");
+                        else sendChat("!silentoff");
+                    }
+                },
+                {
+                    type: "button",
+                    label: "⏹ Выключить TP",
+                    action: function() { sendChat("!silentoff"); }
+                }
+            ],
+
+            // ─────────────────────────────────────
+            "Appearance": [
+                {
+                    type: "button",
+                    label: "📋 Показать внешность",
+                    action: function() { sendChat("!look"); }
+                },
+                {
+                    type: "button",
+                    label: "🔑 Показать ключи",
+                    action: function() { sendChat("!keys"); }
+                },
+                {
+                    type: "button",
+                    label: "👱 Волосы тип +1",
+                    action: function() {
+                        try {
+                            var ht = (global.appearanceData && global.appearanceData.appearance.ht) || 0;
+                            sendChat("!hairtype " + (ht + 1));
+                        } catch(e) { sendChat("!hairtype 1"); }
+                    }
+                },
+                {
+                    type: "button",
+                    label: "🎨 Цвет волос +1",
+                    action: function() {
+                        try {
+                            var hc = (global.appearanceData && global.appearanceData.appearance.hc) || 0;
+                            sendChat("!haircolor " + (hc + 1));
+                        } catch(e) { sendChat("!haircolor 1"); }
+                    }
+                },
+                {
+                    type: "button",
+                    label: "👁 Тип глаз +1",
+                    action: function() {
+                        try {
+                            var et = (global.appearanceData && global.appearanceData.appearance.et) || 0;
+                            sendChat("!eyetype " + (et + 1));
+                        } catch(e) { sendChat("!eyetype 1"); }
+                    }
+                },
+                {
+                    type: "button",
+                    label: "🎨 Цвет глаз +1",
+                    action: function() {
+                        try {
+                            var ec = (global.appearanceData && global.appearanceData.appearance.ec) || 0;
+                            sendChat("!eyes " + (ec + 1));
+                        } catch(e) { sendChat("!eyes 1"); }
+                    }
+                },
+                {
+                    type: "button",
+                    label: "🔀 Random Combo",
+                    action: function() {
+                        sendChat("!random hc:1,2,3,4,5,6,7,8 ec:1,2,3,4,5 brc:1,2,3 2000");
+                    }
+                },
+                {
+                    type: "button",
+                    label: "⏹ Стоп",
+                    action: function() { sendChat("!stop"); }
+                }
+            ],
+
+            // ─────────────────────────────────────
+            "Zone Kick": [
+                {
+                    type: "toggle",
+                    label: "🔴 Zone Kick ВСЕХ",
+                    getState: function() { return State.getZoneKick(); },
+                    action: function(on) {
+                        if (on) sendChat("!kickall");
+                        else sendChat("!stopkickall");
+                    }
+                },
+                {
+                    type: "button",
+                    label: "👥 Список игроков",
+                    action: function() { sendChat("!players"); }
+                },
+                {
+                    type: "button",
+                    label: "🚪 Кикнуть всех сейчас",
+                    action: function() { sendChat("!kickall"); }
+                },
+                {
+                    type: "button",
+                    label: "⏹ Остановить кик",
+                    action: function() { sendChat("!stopkickall"); }
+                },
+                {
+                    type: "button",
+                    label: "🗑 Очистить список",
+                    action: function() { sendChat("!clearplayers"); }
+                },
+                {
+                    type: "button",
+                    label: "📍 Текущая комната",
+                    action: function() { sendChat("!room"); }
+                },
+                {
+                    type: "button",
+                    label: "🆔 Мой ID",
+                    action: function() { sendChat("!myid"); }
+                }
+            ],
+
+            // ─────────────────────────────────────
+            "Relations": [
+                {
+                    type: "button",
+                    label: "❤ В друзья (нужен ID)",
+                    action: function() {
+                        try {
+                            var tid = global.lastTarget || "";
+                            if (tid) sendChat("!tofriend " + tid);
+                            else console.log("[BM-UI] Нет цели! Нажми на игрока");
+                        } catch(e) {}
+                    }
+                },
+                {
+                    type: "button",
+                    label: "📊 Статус системы",
+                    action: function() { sendChat("!who"); }
+                }
+            ],
+
+            // ─────────────────────────────────────
+            "Другое": [
+                {
+                    type: "button",
+                    label: "🎓 Пропустить туториал",
+                    action: function() { sendChat("!skip"); }
+                },
+                {
+                    type: "button",
+                    label: "💼 Собрать работу",
+                    action: function() { sendChat("!work"); }
+                },
+                {
+                    type: "button",
+                    label: "🐛 Debug меню",
+                    action: function() { sendChat("!debug"); }
+                },
+                {
+                    type: "button",
+                    label: "📊 Полный статус",
+                    action: function() { sendChat("!status"); }
+                },
+                {
+                    type: "button",
+                    label: "❓ Помощь",
+                    action: function() { sendChat("!help"); }
+                },
+                {
+                    type: "button",
+                    label: "⏹ Выключить ВСЁ",
+                    action: function() { sendChat("!off"); }
+                }
+            ]
+        };
+
+        return items[cat] || [];
+    }
+
+    // ==========================================
+    // ОТПРАВКА КОМАНДЫ В ЧАТ (через native скрипт)
+    // ==========================================
+    function sendChat(cmd) {
         try {
-            var Color = Java.use('android.graphics.Color');
-            var on = feat.enabled;
-            btn.setText((on ? "✓  " : "✗  ") + feat.name);
-            btn.setTextColor(on ? Color.parseColor("#00FF66") : Color.parseColor("#FF4444"));
-            btn.setBackgroundColor(
-                on ? Color.argb(200, 0, 100, 30) : Color.argb(200, 80, 0, 0)
-            );
+            // Способ 1: через глобальный обработчик native скрипта
+            // Эмулируем команду чата напрямую
+            console.log("[BM-UI CMD] " + cmd);
+
+            // Парсим команду и вызываем напрямую
+            var parts = cmd.trim().split(" ");
+            var c = parts[0];
+            var a1 = parts[1];
+            var a2 = parts[2];
+
+            // Анимации
+            if (c === "!guitar")   { try { global.nextNet = { gr: "skygacha26_guitar_off", at: "PlayGuitNew1" }; global.isLocked = true; global.validVTable = null; } catch(e) {} }
+            if (c === "!cyber")    { try { global.nextNet = { gr: "myAvatar", at: "est23solodnc" }; global.isLocked = true; global.validVTable = null; } catch(e) {} }
+            if (c === "!dj")       { try { global.nextNet = { gr: "danceroom_djpult_off", at: "Dj" }; global.isLocked = true; global.validVTable = null; } catch(e) {} }
+            if (c === "!off")      { try { global.nextNet = null; global.isLocked = false; global.SILENT_COMMAND = ""; global.TP_COMMAND = ""; global.pendingSilentReplace = ""; global.stopAllTimers(); } catch(e) {} }
+            if (c === "!stop")     { try { global.stopAllTimers(); } catch(e) {} }
+
+            // Silent
+            if (c === "!kiss")        { try { global.SILENT_COMMAND = "r.ks"; global.TP_COMMAND = ""; } catch(e) {} }
+            if (c === "!kisslong")    { try { global.SILENT_COMMAND = "r.kl"; global.TP_COMMAND = ""; } catch(e) {} }
+            if (c === "!hug")         { try { global.SILENT_COMMAND = "r.hg"; global.TP_COMMAND = ""; } catch(e) {} }
+            if (c === "!danceaction") { try { global.SILENT_COMMAND = "r.pd"; global.TP_COMMAND = ""; } catch(e) {} }
+            if (c === "!fiveaction")  { try { global.SILENT_COMMAND = "r.hf"; global.TP_COMMAND = ""; } catch(e) {} }
+            if (c === "!silentoff")   { try { global.SILENT_COMMAND = ""; global.TP_COMMAND = ""; global.pendingSilentReplace = ""; } catch(e) {} }
+
+            // Teleport
+            if (c === "!tpkiss")     { try { global.TP_COMMAND = "r.ks"; global.SILENT_COMMAND = ""; } catch(e) {} }
+            if (c === "!tpkisslong") { try { global.TP_COMMAND = "r.kl"; global.SILENT_COMMAND = ""; } catch(e) {} }
+            if (c === "!tphug")      { try { global.TP_COMMAND = "r.hg"; global.SILENT_COMMAND = ""; } catch(e) {} }
+            if (c === "!tpdance")    { try { global.TP_COMMAND = "r.pd"; global.SILENT_COMMAND = ""; } catch(e) {} }
+            if (c === "!tpfive")     { try { global.TP_COMMAND = "r.hf"; global.SILENT_COMMAND = ""; } catch(e) {} }
+            if (c === "!tpkick")     { try { global.TP_COMMAND = "r.ka"; global.SILENT_COMMAND = ""; } catch(e) {} }
+
+            // Zone Kick
+            if (c === "!kickall")     { try { global.startZoneKick(); } catch(e) {} }
+            if (c === "!stopkickall") { try { global.stopZoneKick(); } catch(e) {} }
+            if (c === "!clearplayers"){ try { global.foundPlayers = {}; global.kickQueue = []; } catch(e) {} }
+
+            // Другое
+            if (c === "!skip")   { try { global.skipTutorial(); } catch(e) {} }
+            if (c === "!work")   { try { global.smartFinishAll(); } catch(e) {} }
+            if (c === "!debug")  { try { global.openDebugMenu(); } catch(e) {} }
+            if (c === "!status") { try { global.who(); } catch(e) {} }
+            if (c === "!who")    { try { global.who(); } catch(e) {} }
+
+            // Appearance
+            if (c === "!hairtype" && a1)  { try { global.sendAppearance({"ht": parseInt(a1)}); } catch(e) {} }
+            if (c === "!haircolor" && a1) { try { global.sendAppearance({"hc": parseInt(a1)}); } catch(e) {} }
+            if (c === "!eyes" && a1)      { try { global.sendAppearance({"ec": parseInt(a1)}); } catch(e) {} }
+            if (c === "!eyetype" && a1)   { try { global.sendAppearance({"et": parseInt(a1)}); } catch(e) {} }
+            if (c === "!look")  { try { global.showAppearance(); } catch(e) {} }
+            if (c === "!keys")  { try { global.showKeys(); } catch(e) {} }
+            if (c === "!stop")  { try { global.stopAllTimers(); } catch(e) {} }
+            if (c === "!random" && a1) { parseAndRunRandom(parts.slice(1)); }
+
+            // Relations
+            if (c === "!tofriend" && a1) { try { global.chainToFriend(a1, 2500); } catch(e) {} }
+
+            // Dupe
+            if (c === "!dupe" && a1) { try { global.duplicateRequest(parseInt(a1) || 20, 200); } catch(e) {} }
+
+        } catch(e) {
+            console.log("[BM-UI] sendChat error: " + e);
+        }
+    }
+
+    function parseAndRunRandom(args) {
+        try {
+            var config = {};
+            var interval = 2000;
+            for (var i = 0; i < args.length; i++) {
+                var p = args[i];
+                if (p.indexOf(":") !== -1) {
+                    var kv = p.split(":");
+                    config[kv[0]] = kv[1].split(",").map(function(x) { return parseInt(x); });
+                } else {
+                    interval = parseInt(p) || 2000;
+                }
+            }
+            if (Object.keys(config).length > 0) global.randomAppearance(config, interval);
         } catch(e) {}
     }
 
     // ==========================================
-    // HELPER: setClick без дублирования имён
+    // HELPER: onClick с уникальным именем
     // ==========================================
-    var clickCounter = 0;
-    function setClick(view, name, callback) {
+    function onClick(view, name, cb) {
         clickCounter++;
-        var OnClick = Java.use('android.view.View$OnClickListener');
         var Listener = Java.registerClass({
-            name: 'com.bm.' + name + '_' + clickCounter,
-            implements: [OnClick],
+            name: 'com.bm.L_' + name + '_' + clickCounter,
+            implements: [Java.use('android.view.View$OnClickListener')],
             methods: {
                 onClick: function(v) {
-                    try { callback(); } catch(e) {
-                        console.log("[BM] click error: " + e);
+                    try { cb(); } catch(e) {
+                        console.log("[BM-UI] click error: " + e);
                     }
                 }
             }
@@ -374,90 +742,5 @@ Java.perform(function() {
         view.setOnClickListener(Listener.$new());
     }
 
-    // ==========================================
-    // ФИЧИ + РЕАЛЬНЫЕ ХУКИ
-    // ==========================================
-    function getFeatures(cat) {
-        var all = {
-            "Машины": [
-                { key: "flyCar",    name: "Fly Car",     enabled: false, onToggle: hook_FlyCar },
-                { key: "godMode",   name: "God Car",     enabled: false, onToggle: hook_GodCar },
-                { key: "speedHack", name: "Speed x5",    enabled: false, onToggle: hook_Speed  }
-            ],
-            "Персонаж": [
-                { key: "godMode",      name: "God Mode",    enabled: false, onToggle: hook_GodMode },
-                { key: "infiniteAmmo", name: "Inf HP",      enabled: false, onToggle: hook_InfHP   }
-            ],
-            "Перемещение": [
-                { key: "speedHack", name: "Speed Hack",  enabled: false, onToggle: hook_Speed    },
-                { key: "superJump", name: "Super Jump",  enabled: false, onToggle: hook_Jump     },
-                { key: "noClip",    name: "No Clip",     enabled: false, onToggle: hook_NoClip   }
-            ],
-            "Оружие": [
-                { key: "infiniteAmmo", name: "Inf Ammo",  enabled: false, onToggle: hook_Ammo    },
-                { key: "noReload",     name: "No Reload", enabled: false, onToggle: hook_Reload  },
-                { key: "rapidFire",    name: "Rapid Fire",enabled: false, onToggle: hook_Rapid   }
-            ],
-            "Боты": [
-                { key: "freezeBots", name: "Freeze Bots", enabled: false, onToggle: hook_Freeze  }
-            ],
-            "Визуал": [
-                { key: "esp", name: "ESP", enabled: false, onToggle: hook_ESP }
-            ],
-            "Другое": [
-                { key: "antiBan",   name: "Anti Ban",   enabled: false, onToggle: hook_AntiBan  },
-                { key: "unlockAll", name: "Unlock All", enabled: false, onToggle: hook_Unlock   }
-            ]
-        };
-        return all[cat] || [];
-    }
-
-    // ==========================================
-    // ХУКИ ФИЧ (заглушки - замени на свои)
-    // ==========================================
-    function hook_FlyCar(state) {
-        console.log("[BM] Fly Car = " + state);
-        // Java.use("твой.класс").метод.implementation = ...
-    }
-    function hook_GodCar(state) {
-        console.log("[BM] God Car = " + state);
-    }
-    function hook_Speed(state) {
-        console.log("[BM] Speed = " + state);
-    }
-    function hook_GodMode(state) {
-        console.log("[BM] God Mode = " + state);
-    }
-    function hook_InfHP(state) {
-        console.log("[BM] Inf HP = " + state);
-    }
-    function hook_Jump(state) {
-        console.log("[BM] Super Jump = " + state);
-    }
-    function hook_NoClip(state) {
-        console.log("[BM] No Clip = " + state);
-    }
-    function hook_Ammo(state) {
-        console.log("[BM] Inf Ammo = " + state);
-    }
-    function hook_Reload(state) {
-        console.log("[BM] No Reload = " + state);
-    }
-    function hook_Rapid(state) {
-        console.log("[BM] Rapid Fire = " + state);
-    }
-    function hook_Freeze(state) {
-        console.log("[BM] Freeze Bots = " + state);
-    }
-    function hook_ESP(state) {
-        console.log("[BM] ESP = " + state);
-    }
-    function hook_AntiBan(state) {
-        console.log("[BM] Anti Ban = " + state);
-    }
-    function hook_Unlock(state) {
-        console.log("[BM] Unlock All = " + state);
-    }
-
-    console.log("[BM] Хуки установлены, ждём Activity...");
+    console.log("[BM-UI] Хуки Activity установлены, ждём запуска...");
 });
