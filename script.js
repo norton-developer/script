@@ -23,8 +23,6 @@ function initScript() {
 // === ЗАЩИТА ОТ КРАША ===
 var validVTable = null;
 var clothesConfigBlocked = false;
-var originalLoadConfigs = null;
-
 // === GIFT HACK ===
 var GIFT_TARGET = "cyberDance";
 var GIFT_ENABLED = true;
@@ -67,10 +65,6 @@ var createRelCtor = null;
 var capturedMapPtr = null;
 var isAllowedToKick = false;
 
-// === ДЛЯ B.O.X КНОПКИ ===
-var isModdingActive = false;
-var box_buttonobjmenu = null;
-
 // === APPEARANCE ===
 var APPEARANCE_KEYS = {
     "g":"Gender", "n":"Nickname", "sc":"Skin Color",
@@ -100,8 +94,6 @@ var lastTarget = "";
 var pendingSilentReplace = "";
 var interactCtorAddr = null;
 var dtorAddr = null;
-var originalKick = null;
-
 // === ZONE KICK ===
 var foundPlayers = {};
 var currentRoomId = "";
@@ -282,14 +274,6 @@ function writeStr(addr, text) {
     } catch(e) {}
 }
 
-function writeRawString(addr, text) {
-    if (addr.isNull()) return;
-    var safeText = text.substring(0, 22);
-    for (var i = 0; i < 32; i++) addr.add(i).writeU8(0);
-    addr.writeU8(safeText.length << 1);
-    addr.add(1).writeUtf8String(safeText);
-}
-
 function patchExistingString(strObj, newText) {
     try {
         var isLong = strObj.readU8() & 1;
@@ -299,31 +283,6 @@ function patchExistingString(strObj, newText) {
         else strObj.writeU8(newText.length << 1);
         return true;
     } catch (e) { return false; }
-}
-
-function createStdString(text) {
-    var safeText = text.substring(0, 22);
-    var strPtr = pinMem(Memory.alloc(32));
-    for (var i = 0; i < 32; i++) strPtr.add(i).writeU8(0);
-    strPtr.writeU8(safeText.length << 1);
-    strPtr.add(1).writeUtf8String(safeText);
-    return strPtr;
-}
-
-function createStdStringLong(text) {
-    var strPtr = pinMem(Memory.alloc(32));
-    for (var i = 0; i < 32; i++) strPtr.add(i).writeU8(0);
-    if (text.length <= 22) {
-        strPtr.writeU8(text.length << 1);
-        strPtr.add(1).writeUtf8String(text);
-    } else {
-        var heapBuf = pinMem(Memory.alloc(text.length + 1));
-        heapBuf.writeUtf8String(text);
-        strPtr.writeU8(1);
-        strPtr.add(8).writeU64(text.length);
-        strPtr.add(16).writePointer(heapBuf);
-    }
-    return strPtr;
 }
 
 function makeStr(text) {
@@ -353,13 +312,7 @@ function copyPointerData(srcPtr, size) {
     }
 }
 
-function toast(msg) { console.log("[TOAST] " + msg); }
 function giftLog(msg) { console.log("[GIFT] " + msg); }
-
-function playClick() {
-    var addr = get_func("_ZN12SoundManager14playClickSoundEv");
-    if (addr) { try { new NativeFunction(addr, 'void', [])(); } catch(e) {} }
-}
 
 function getCmdProcessor() {
     var addr = get_func("_ZN9SingletonIN3ags16CommandProcessorEE11getInstanceEv");
@@ -393,23 +346,10 @@ function playLocalAnimation(animName) {
         var avatarObj = myAvatarObject || getMyAvatar();
         if (!avatarObj) return;
         if (!setAnimationFunc) return;
-        var animStr = createStdString(animName);
-        var emptyStr = createStdString("");
+        var animStr = makeStr(animName);
+        var emptyStr = makeStr("");
         setAnimationFunc(avatarObj, animStr, emptyStr, 1);
     } catch (e) {}
-}
-
-function openDebugMenu() {
-    var getInstance = get_func("_ZN9SingletonI13DialogManagerE11getInstanceEv");
-    var createDebug = get_func("_ZN13DialogManager17createDebugDialogEv");
-    var showDialogAddr2 = get_func("_ZN13DialogManager10showDialogEP10BaseDialogbb");
-    if (getInstance && createDebug && showDialogAddr2) {
-        var mgr = new NativeFunction(getInstance, 'pointer', [])();
-        var dlg = new NativeFunction(createDebug, 'pointer', [])();
-        var show = new NativeFunction(showDialogAddr2, 'void', ['pointer', 'pointer', 'int', 'int']);
-        show(mgr, dlg, 0, 0);
-        console.log("[+] Debug Menu");
-    }
 }
 
 function follow(targetId) {
@@ -423,7 +363,7 @@ function follow(targetId) {
     if (!followAddr) followAddr = get_func("_ZN3ags14PlayersCommand20PlayersFollowRequestC2ENSt6__ndk112basic_stringIcNS2_11char_traitsIcEENS2_9allocatorIcEEEE");
     if (followAddr) {
         var createRequest = new NativeFunction(followAddr, 'void', ['pointer', 'pointer']);
-        var idStr = createStdString(targetId);
+        var idStr = makeStr(targetId);
         var requestBuf = pinMem(Memory.alloc(1024));
         createRequest(requestBuf, idStr);
         schedule(globalProcessor, requestBuf);
@@ -470,9 +410,9 @@ function duplicateRequest(times, delay) {
             return;
         }
         try {
-            var gr = createStdStringLong(savedArgs.group);
-            var at = createStdStringLong(savedArgs.action);
-            var trg = createStdStringLong(savedArgs.target);
+            var gr = makeStr(savedArgs.group);
+            var at = makeStr(savedArgs.action);
+            var trg = makeStr(savedArgs.target);
             var requestBuf = pinMem(Memory.alloc(1024));
             ctor(requestBuf, gr, at, trg, savedArgs.roomId, savedArgs.mapData);
             schedule(globalProcessor, requestBuf);
@@ -490,7 +430,7 @@ function sendRelStatus(uid, status) {
     }
     try {
         var requestBuf = pinMem(Memory.alloc(1024));
-        var uidStr = createStdString(uid.toString());
+        var uidStr = makeStr(uid.toString());
         var map;
         if (capturedMapPtr && !capturedMapPtr.isNull()) {
             map = capturedMapPtr;
@@ -511,7 +451,7 @@ function sendRelCreate(uid, type) {
     }
     try {
         var requestBuf = pinMem(Memory.alloc(1024));
-        var uidStr = createStdString(uid.toString());
+        var uidStr = makeStr(uid.toString());
         createRelCtor(requestBuf, uidStr, type);
         schedule(globalProcessor, requestBuf);
         return true;
@@ -903,6 +843,20 @@ function comboAppearance(config, ms) {
         sendAppearance(mods, true);
     }, ms);
     comboTimers.push(t);
+}
+
+function parseConfig(parts) {
+    var config = {}, interval = 2000;
+    for (var i = 1; i < parts.length; i++) {
+        var p = parts[i];
+        if (p.indexOf(":") !== -1) {
+            var kv = p.split(":");
+            config[kv[0]] = kv[1].split(",").map(function(x) { return parseInt(x); });
+        } else {
+            interval = parseInt(p) || 2000;
+        }
+    }
+    return { config: config, interval: interval };
 }
 
 function randomAppearance(config, ms) {
@@ -1700,8 +1654,6 @@ if (clientsendAddr) {
             var arg3 = parts[3];
 
             // === ОСНОВНЫЕ КОМАНДЫ ===
-            if (cmd === "!test") { cmd = "!status"; }
-            if (cmd === "!debug") { openDebugMenu(); playClick(); }
             if (cmd === "!work") smartFinishAll();
 
             // === GIFT ===
@@ -1746,7 +1698,7 @@ if (clientsendAddr) {
             if (cmd === "!save" && arg1 && nextNet) { savedSlots[arg1] = { gr: nextNet.gr, at: nextNet.at, visual: parts[2] || "Dance1" }; showAlert("BloodMoon", "Слот " + arg1 + " сохранен"); }
             if (cmd === "!del" && arg1 && savedSlots[arg1]) { delete savedSlots[arg1]; showAlert("BloodMoon", "Слот " + arg1 + " удален!"); }
             if (cmd === "!clear") { savedSlots = {}; showAlert("BloodMoon", "Слоты отчищены"); }
-            if (cmd === "!clearslots") { savedSlots = {}; showAlert("BloodMoon", "Слоты отчищены"); }
+
             if (cmd === "!anim" && arg1) playLocalAnimation(arg1);
             if (cmd === "!tofriend" && arg1) chainToFriend(arg1, 2500);
 
@@ -1755,7 +1707,7 @@ if (clientsendAddr) {
 
             // === APPEARANCE ===
             if (cmd === "!hair" && arg1) sendAppearance({"ht": parseInt(arg1)});
-            if (cmd === "!hairtype" && arg1) sendAppearance({"ht": parseInt(arg1)});
+
             if (cmd === "!haircolor" && arg1) sendAppearance({"hc": parseInt(arg1)});
             if (cmd === "!eyes" && arg1) sendAppearance({"ec": parseInt(arg1)});
             if (cmd === "!eyetype" && arg1) sendAppearance({"et": parseInt(arg1)});
@@ -1783,34 +1735,14 @@ if (clientsendAddr) {
 
             // !combo hc:1,2,3,4,5 ec:1,2,3 brc:1,2,3 2000
             if (cmd === "!combo") {
-                var config = {};
-                var interval = 2000;
-                for (var pi = 1; pi < parts.length; pi++) {
-                    var p = parts[pi];
-                    if (p.indexOf(":") !== -1) {
-                        var kv = p.split(":");
-                        config[kv[0]] = kv[1].split(",").map(function(x) { return parseInt(x); });
-                    } else {
-                        interval = parseInt(p) || 2000;
-                    }
-                }
-                if (Object.keys(config).length > 0) comboAppearance(config, interval);
+                var parsed = parseConfig(parts);
+                if (Object.keys(parsed.config).length > 0) comboAppearance(parsed.config, parsed.interval);
             }
 
             // !random hc:1,2,3,4,5 ec:1,2,3 2000
             if (cmd === "!random") {
-                var config = {};
-                var interval = 2000;
-                for (var pi = 1; pi < parts.length; pi++) {
-                    var p = parts[pi];
-                    if (p.indexOf(":") !== -1) {
-                        var kv = p.split(":");
-                        config[kv[0]] = kv[1].split(",").map(function(x) { return parseInt(x); });
-                    } else {
-                        interval = parseInt(p) || 2000;
-                    }
-                }
-                if (Object.keys(config).length > 0) randomAppearance(config, interval);
+                var parsed = parseConfig(parts);
+                if (Object.keys(parsed.config).length > 0) randomAppearance(parsed.config, parsed.interval);
             }
 
             if (cmd === "!stop") stopAllTimers();
@@ -1909,26 +1841,7 @@ if (clientsendAddr) {
                 console.log("══════════════════════\n");
             }
 
-            if (cmd === "!room") console.log("[ROOM] " + currentRoomId);
-            if (cmd === "!myid") console.log("[MY ID] " + myPlayerId);
-            if (cmd === "!setroom" && arg1) { currentRoomId = parts.slice(1).join(" "); console.log("[ROOM] " + currentRoomId); }
-            if (cmd === "!setmyid" && arg1) { myPlayerId = arg1; console.log("[MY ID] " + myPlayerId); }
-            if (cmd === "!clearplayers") { foundPlayers = {}; kickQueue = []; console.log("[+] Cleared"); }
-
-            if (cmd === "!who") {
-                var myAv = getMyAvatar();
-                console.log("\n══════════════════════════");
-                console.log("  Me:        " + myPlayerId);
-                console.log("  Target:    " + (lastTarget || "❓"));
-                console.log("  Room:      " + (currentRoomId || "❓"));
-                console.log("  Silent:    " + (SILENT_COMMAND ? getActionName(SILENT_COMMAND) + " (подход)" : "OFF"));
-                console.log("  Teleport:  " + (TP_COMMAND ? getActionName(TP_COMMAND) + " (⚡мгновенно)" : "OFF"));
-                console.log("  MyAvatar:  " + (myAv ? "✅ " + myAv : "❌"));
-                console.log("  Processor: " + (globalProcessor ? "✅" : "❌"));
-                console.log("  Go ctors:  " + Object.keys(goCtorAddrs).length);
-                console.log("  Simple:    " + Object.keys(simpleCtorAddrs).length);
-                console.log("══════════════════════════\n");
-            }
+            if (cmd === "!who") global.who();
 
             if (cmd === "!status") {
                 var myAv = getMyAvatar();
@@ -1972,7 +1885,7 @@ if (clientsendAddr) {
                     "=== С ПОДХОДОМ ===\n" +
                     "!kiss !hug !kisslong\n" +
                     "!danceaction !fiveaction\n" +
-                    "=== ТЕЛЕПОРТ ⚡ ===\n" +
+                    "=== ТЕЛЕПОРТ ===\n" +
                     "!tpkiss !tphug !tpkisslong\n" +
                     "!tpdance !tpfive !tpkick\n" +
                     "!silentoff !who\n" +
@@ -1980,15 +1893,15 @@ if (clientsendAddr) {
                     "!players");
                 console.log("\n═══════════════════════════════════════════════════════════");
                 console.log("  === ОСНОВНЫЕ ===");
-                console.log("  !test !debug !work !skip");
+                console.log("  !work !skip !off");
                 console.log("");
                 console.log("  === GIFT ===");
                 console.log("  !gift <id>  !gifton  !giftoff");
                 console.log("");
                 console.log("  === АНИМАЦИИ ===");
-                console.log("  !guitar !cyber !dj !setAnim <gr> <at> !off");
+                console.log("  !guitar !cyber !dj !setAnim <gr> <at>");
                 console.log("  !follow <id>  !rep <n>  !dupe <n>");
-                console.log("  !save <slot>  !del <slot>  !anim <name>");
+                console.log("  !save <slot>  !del <slot>  !clear  !anim <name>");
                 console.log("");
                 console.log("  === APPEARANCE ===");
                 console.log("  !hair <n> !eyes <n> !skin <n> !brows <n> !mouth <n>");
@@ -2000,7 +1913,7 @@ if (clientsendAddr) {
                 console.log("  === SILENT ACTION (с подходом) ===");
                 console.log("  !kiss !hug !kisslong !kickaction !danceaction !fiveaction");
                 console.log("");
-                console.log("  === ТЕЛЕПОРТ ⚡ (без подхода, мгновенно) ===");
+                console.log("  === ТЕЛЕПОРТ (без подхода, мгновенно) ===");
                 console.log("  !tpkiss !tpkisslong !tphug");
                 console.log("  !tpdance !tpfive !tpkick");
                 console.log("");
@@ -2013,7 +1926,7 @@ if (clientsendAddr) {
                 console.log("  === ZONE KICK ===");
                 console.log("  !kickall  !stopkickall");
                 console.log("  !whitelist <id1> <id2>  !clearlist");
-                console.log("  !players  !room !myid !clearplayers");
+                console.log("  !players");
                 console.log("");
                 console.log("  !status — полный статус");
                 console.log("  !off — выключить ВСЁ");
