@@ -1,10 +1,14 @@
 /**
- * Frida Script: Ghost Mode v4.0 - FIXED
+ * Frida Script: Ghost Mode v5.1
  * Target: libMyGame.so
  *
- * BUG FIX: State requests were being blocked AFTER coordinates were faked.
- *   The server never received the fake position, so the player stayed visible.
- *   Fix: State requests now pass through with faked coords. Only move requests are blocked.
+ * v5.1 фиксы:
+ *   - FIX: sendStatePacket больше не перезаписывает realX/realY фейковыми координатами
+ *   - FIX: pin buffer восстановлен до 3000 (было 1000 — могло вызвать краш при GC)
+ *   - FIX: createStdString корректно пишет capacity для длинных строк
+ *   - FIX: state faking пропускается для наших внутренних пакетов
+ *   - Добавлена команда debug() для диагностики
+ *   - Логи блокировок и фейков (первые 3 + каждый 50-й)
  */
 
 const moduleName = "libMyGame.so";
@@ -19,78 +23,81 @@ function waitForModule() {
 function initScript() {
 
     // =========================================================
-    // GLOBAL VARIABLES
+    // ПЕРЕМЕННЫЕ
     // =========================================================
     var globalProcessor = null;
     var schedule = null;
-
     var myPlayerId = "";
     var currentRoomId = "";
 
     var pinnedMemory = [];
-    function pinMem(ptr) {
+    function pin(ptr) {
         pinnedMemory.push(ptr);
         if (pinnedMemory.length > 3000) pinnedMemory.shift();
         return ptr;
     }
 
     // =========================================================
-    // GHOST MODE DATA
+    // ДАННЫЕ GHOST MODE
     // =========================================================
-    var ghostData = {
+    var ghost = {
         uid: "",
+        // Реальная позиция (обновляется всегда из хуков)
         realX: 0, realY: 0,
+        // Позиция назначения из MoveRequest (куда идём)
+        destX: 0, destY: 0,
+        // Фейковая позиция для сервера
         fakeX: -9999, fakeY: -9999,
         dir: 1,
-        state: 0,
-        action: "",
         roomStr: null,
-        ghostMode: false,
-        savedPos: { x: 0, y: 0 },
+        active: false,
+        // Позиция при включении ghost (для save/back)
+        startX: 0, startY: 0,
+        // Счётчики
         blockedMoves: 0,
-        blockedStates: 0
+        fakedStates: 0
     };
 
     var blockedRequests = {};
-    var blockMoveRequests = false;
+    var blockMoves = false;
+    var internalPacket = false; // флаг: наш пакет, не обновлять realX/realY
 
     // =========================================================
-    // CORE FUNCTION ADDRESSES
+    // АДРЕСА ФУНКЦИЙ
     // =========================================================
-    const RoomAvatarUpdateStateRequest_C1 = Module.findExportByName(moduleName,
+    const StateRequestCtor = Module.findExportByName(moduleName,
         "_ZN3ags11RoomCommand28RoomAvatarUpdateStateRequestC1ERKNS0_21AvatarUpdateStateDataERKNSt6__ndk112basic_stringIcNS5_11char_traitsIcEENS5_9allocatorIcEEEE");
 
-    const RoomAvatarMoveRequest_C1 = Module.findExportByName(moduleName,
+    const MoveRequestCtor = Module.findExportByName(moduleName,
         "_ZN3ags11RoomCommand21RoomAvatarMoveRequestC1ERKNSt6__ndk112basic_stringIcNS2_11char_traitsIcEENS2_9allocatorIcEEEEN7cocos2d4Vec2ESC_SA_");
 
     const scheduleRequestAddr = Module.findExportByName(moduleName,
         "_ZN3ags16CommandProcessor15scheduleRequestERKNS_10AGSRequestE");
 
-    console.log("[*] RoomAvatarUpdateStateRequest: " + RoomAvatarUpdateStateRequest_C1);
-    console.log("[*] RoomAvatarMoveRequest: " + RoomAvatarMoveRequest_C1);
-    console.log("[*] scheduleRequest: " + scheduleRequestAddr);
+    console.log("[*] StateRequest: " + StateRequestCtor);
+    console.log("[*] MoveRequest:  " + MoveRequestCtor);
+    console.log("[*] schedule:     " + scheduleRequestAddr);
 
     // =========================================================
-    // ALERT SYSTEM
+    // АЛЕРТЫ
     // =========================================================
     var pendingTasks = [];
     var mainLoopAddr = Module.findExportByName(moduleName, "_ZN7cocos2d8Director8mainLoopEv");
     if (mainLoopAddr) {
         Interceptor.attach(mainLoopAddr, {
-            onEnter: function (args) {
+            onEnter: function () {
                 while (pendingTasks.length > 0) {
-                    var task = pendingTasks.shift();
-                    try { task(); } catch (e) { }
+                    try { pendingTasks.shift()(); } catch (e) { }
                 }
             }
         });
     }
 
-    var dmSingletonAddr = Module.findExportByName(moduleName, "_ZN9SingletonI13DialogManagerE10m_instanceE");
-    var showAlertBoxAddr = Module.findExportByName(moduleName, "_ZN13DialogManager12showAlertBoxERKNSt6__ndk112basic_stringIcNS0_11char_traitsIcEENS0_9allocatorIcEEEES8_RKNS0_8functionIFvvEEE");
-    var alertKeepAlive = [];
+    var dmSingleton = Module.findExportByName(moduleName, "_ZN9SingletonI13DialogManagerE10m_instanceE");
+    var showAlertBox = Module.findExportByName(moduleName, "_ZN13DialogManager12showAlertBoxERKNSt6__ndk112basic_stringIcNS0_11char_traitsIcEENS0_9allocatorIcEEEES8_RKNS0_8functionIFvvEEE");
+    var alertKeep = [];
 
-    function makeAlertString(str) {
+    function makeAlertStr(str) {
         var encoded = Memory.allocUtf8String(str);
         var byteLen = 0;
         while (encoded.add(byteLen).readU8() !== 0) byteLen++;
@@ -98,34 +105,34 @@ function initScript() {
         var buf = Memory.alloc(cap);
         Memory.copy(buf, encoded, byteLen);
         buf.add(byteLen).writeU8(0);
-        alertKeepAlive.push(buf);
+        alertKeep.push(buf);
         var mem = Memory.alloc(24);
         mem.writeU64(cap | 1);
         mem.add(8).writeU64(byteLen);
         mem.add(16).writePointer(buf);
-        alertKeepAlive.push(mem);
+        alertKeep.push(mem);
         return mem;
     }
 
     function showAlert(title, message) {
-        if (!dmSingletonAddr || !showAlertBoxAddr) return;
+        if (!dmSingleton || !showAlertBox) return;
         pendingTasks.push(function () {
             try {
-                var dm = dmSingletonAddr.readPointer();
+                var dm = dmSingleton.readPointer();
                 if (dm.isNull()) return;
-                alertKeepAlive = [];
-                var t = makeAlertString(title || "");
-                var m = makeAlertString(message || "");
+                alertKeep = [];
+                var t = makeAlertStr(title || "");
+                var m = makeAlertStr(message || "");
                 var e = Memory.alloc(48);
                 for (var i = 0; i < 48; i += 8) e.add(i).writeU64(0);
-                alertKeepAlive.push(e);
-                new NativeFunction(showAlertBoxAddr, 'void', ['pointer', 'pointer', 'pointer', 'pointer'])(dm, t, m, e);
+                alertKeep.push(e);
+                new NativeFunction(showAlertBox, 'void', ['pointer', 'pointer', 'pointer', 'pointer'])(dm, t, m, e);
             } catch (e) { }
         });
     }
 
     // =========================================================
-    // UTILS
+    // УТИЛИТЫ
     // =========================================================
     function get_func(name) { return Module.findExportByName(moduleName, name); }
 
@@ -147,17 +154,17 @@ function initScript() {
         var len = str.length;
         if (len <= 22) {
             mem.writeU8(len << 1);
-            for (var i = 0; i < len; i++) {
-                mem.add(1 + i).writeU8(str.charCodeAt(i));
-            }
+            for (var i = 0; i < len; i++) mem.add(1 + i).writeU8(str.charCodeAt(i));
             mem.add(1 + len).writeU8(0);
         } else {
             var strData = Memory.allocUtf8String(str);
-            mem.writeU8(1);
+            var cap = len + 1; // capacity = len + null terminator
+            mem.writeU64((cap << 1) | 1); // libc++ long string: (cap*2)|1
             mem.add(8).writeU64(len);
             mem.add(16).writePointer(strData);
+            pin(strData);
         }
-        return mem;
+        return pin(mem);
     }
 
     function patchExistingString(strObj, newText) {
@@ -169,6 +176,22 @@ function initScript() {
             else strObj.writeU8(newText.length << 1);
             return true;
         } catch (e) { return false; }
+    }
+
+    // Для чтения Vec2 из аргументов MoveRequest (два float упакованы в uint64)
+    function intBitsToFloat(bits) {
+        var buf = new ArrayBuffer(4);
+        new Uint32Array(buf)[0] = bits >>> 0;
+        return new Float32Array(buf)[0];
+    }
+
+    function unpackVec2(arg) {
+        try {
+            var bigInt = uint64(arg.toString());
+            var low32 = Number(bigInt.and(0xFFFFFFFF));
+            var high32 = Number(bigInt.shr(32).and(0xFFFFFFFF));
+            return { x: intBitsToFloat(low32), y: intBitsToFloat(high32) };
+        } catch (e) { return null; }
     }
 
     function getPlayerID() {
@@ -188,23 +211,22 @@ function initScript() {
     }
 
     // =========================================================
-    // GHOST MODE FUNCTIONS
+    // ОТПРАВКА ПАКЕТА (телепорт/фейк позиция)
     // =========================================================
     function sendStatePacket(uid, x, y, dir, action, state) {
         var cp = getCmdProcessor();
-        if (!cp) { console.log("[!] No CommandProcessor"); return false; }
-        if (!ghostData.roomStr) { console.log("[!] No room data. Move first!"); return false; }
-        if (!RoomAvatarUpdateStateRequest_C1) { console.log("[!] No StateRequest constructor"); return false; }
+        if (!cp) { console.log("[!] Нет CommandProcessor"); return false; }
+        if (!ghost.roomStr) { console.log("[!] Нет roomStr, походи!"); return false; }
+        if (!StateRequestCtor) { console.log("[!] Нет StateRequest конструктора"); return false; }
 
-        // Temporarily disable blocking so our packet goes through
-        var wasBlocking = blockMoveRequests;
-        var wasGhost = ghostData.ghostMode;
-        blockMoveRequests = false;
-        ghostData.ghostMode = false;
+        // Временно отключаем ghost чтобы наш пакет прошёл без фейка
+        var wasBlock = blockMoves;
+        var wasGhost = ghost.active;
+        blockMoves = false;
+        ghost.active = false;
 
-        var stateData = Memory.alloc(128);
+        var stateData = pin(Memory.alloc(128));
         for (var i = 0; i < 128; i++) stateData.add(i).writeU8(0);
-
         Memory.copy(stateData, createStdString(String(uid)), 24);
         stateData.add(24).writeFloat(x);
         stateData.add(28).writeFloat(y);
@@ -212,185 +234,236 @@ function initScript() {
         Memory.copy(stateData.add(40), createStdString(String(action)), 24);
         stateData.add(64).writeS32(state);
 
-        var requestObj = Memory.alloc(512);
-        for (var i = 0; i < 512; i++) requestObj.add(i).writeU8(0);
+        var req = pin(Memory.alloc(512));
+        for (var i = 0; i < 512; i++) req.add(i).writeU8(0);
 
-        var constructor = new NativeFunction(RoomAvatarUpdateStateRequest_C1,
-            'void', ['pointer', 'pointer', 'pointer']);
+        var ctor = new NativeFunction(StateRequestCtor, 'void', ['pointer', 'pointer', 'pointer']);
 
         try {
-            constructor(requestObj, stateData, ghostData.roomStr);
-            schedule(cp, requestObj);
-            blockMoveRequests = wasBlocking;
-            ghostData.ghostMode = wasGhost;
+            internalPacket = true;
+            ctor(req, stateData, ghost.roomStr);
+            internalPacket = false;
+            schedule(cp, req);
+            blockMoves = wasBlock;
+            ghost.active = wasGhost;
             return true;
-        } catch(e) {
-            console.log("[!] Error: " + e.message);
-            blockMoveRequests = wasBlocking;
-            ghostData.ghostMode = wasGhost;
+        } catch (e) {
+            internalPacket = false;
+            console.log("[!] Ошибка: " + e.message);
+            blockMoves = wasBlock;
+            ghost.active = wasGhost;
             return false;
         }
     }
 
     function teleportTo(x, y) {
-        if (!ghostData.uid) {
-            console.log("[!] No UID. Move first!");
-            return;
-        }
-
-        if (sendStatePacket(ghostData.uid, x, y, ghostData.dir, "", 0)) {
-            console.log("[TP] Teleported to (" + x.toFixed(1) + ", " + y.toFixed(1) + ")");
+        if (!ghost.uid) { console.log("[!] Нет UID, походи!"); return; }
+        if (sendStatePacket(ghost.uid, x, y, ghost.dir, "", 0)) {
+            console.log("[TP] -> (" + x.toFixed(1) + ", " + y.toFixed(1) + ")");
         }
     }
 
     // =========================================================
-    // CONSOLE COMMANDS
+    // КОНСОЛЬНЫЕ КОМАНДЫ
     // =========================================================
 
-    // --- Ghost Mode ---
     global.ghost = function(enable) {
         if (enable === false) {
-            ghostData.ghostMode = false;
-            blockMoveRequests = false;
+            // === ВЫКЛЮЧЕНИЕ ===
+            // Запоминаем последнюю реальную позицию ПЕРЕД отключением
+            var returnX = ghost.realX;
+            var returnY = ghost.realY;
 
-            console.log("[GHOST OFF]");
-            console.log("  Blocked moves:  " + ghostData.blockedMoves);
-            console.log("  Faked states:   " + ghostData.blockedStates);
+            ghost.active = false;
+            blockMoves = false;
 
-            ghostData.blockedMoves = 0;
-            ghostData.blockedStates = 0;
+            console.log("\n[GHOST OFF]");
+            console.log("  Заблокировано ходьбы: " + ghost.blockedMoves);
+            console.log("  Подменено состояний: " + ghost.fakedStates);
 
-            if (ghostData.savedPos.x !== 0 || ghostData.savedPos.y !== 0) {
-                teleportTo(ghostData.savedPos.x, ghostData.savedPos.y);
-                console.log("  Returned to (" + ghostData.savedPos.x.toFixed(1) + ", " + ghostData.savedPos.y.toFixed(1) + ")");
+            ghost.blockedMoves = 0;
+            ghost.fakedStates = 0;
+
+            // Телепорт ТУДА ГДЕ ТЫ БЫЛ ПОСЛЕДНИЙ РАЗ
+            if (returnX !== 0 || returnY !== 0) {
+                teleportTo(returnX, returnY);
+                console.log("  Телепорт -> (" + returnX.toFixed(1) + ", " + returnY.toFixed(1) + ")");
             }
-            showAlert("Ghost", "Ghost OFF\nReturned to (" + ghostData.savedPos.x.toFixed(0) + ", " + ghostData.savedPos.y.toFixed(0) + ")");
+            showAlert("Ghost", "Ghost OFF\nТелепорт -> (" + returnX.toFixed(0) + ", " + returnY.toFixed(0) + ")");
             return;
         }
 
-        if (!ghostData.uid || ghostData.realX === 0) {
-            console.log("[!] No data captured. Move your avatar first!");
-            showAlert("Ghost", "Move first!");
+        // === ВКЛЮЧЕНИЕ ===
+        if (!ghost.uid) {
+            console.log("[!] Нет данных. Сделай один шаг!");
+            showAlert("Ghost", "Сделай один шаг!");
+            return;
+        }
+        if (!ghost.roomStr) {
+            console.log("[!] Нет roomStr. Сделай один шаг!");
+            showAlert("Ghost", "Сделай один шаг!");
             return;
         }
 
-        // Save current position
-        ghostData.savedPos.x = ghostData.realX;
-        ghostData.savedPos.y = ghostData.realY;
+        // Запоминаем стартовую позицию
+        ghost.startX = ghost.realX;
+        ghost.startY = ghost.realY;
 
-        // Send fake position to server
-        sendStatePacket(ghostData.uid, ghostData.fakeX, ghostData.fakeY, ghostData.dir, "", 0);
+        // Отправляем фейковую позицию на сервер
+        sendStatePacket(ghost.uid, ghost.fakeX, ghost.fakeY, ghost.dir, "", 0);
 
-        // Now enable blocking for moves, ghost faking for states
-        ghostData.ghostMode = true;
-        blockMoveRequests = true;
+        // Включаем блокировку ходьбы и фейк состояний
+        ghost.active = true;
+        blockMoves = true;
 
-        console.log("\n[GHOST MODE ACTIVATED]");
+        console.log("\n[GHOST ON]");
         console.log("=".repeat(50));
-        console.log("  Saved position: (" + ghostData.savedPos.x.toFixed(1) + ", " + ghostData.savedPos.y.toFixed(1) + ")");
-        console.log("  Fake position:  (" + ghostData.fakeX + ", " + ghostData.fakeY + ")");
-        console.log("  All move requests are BLOCKED");
-        console.log("  State requests sent with FAKE coordinates");
-        console.log("=".repeat(50) + "\n");
-        showAlert("Ghost", "Ghost ON!\nYou are invisible\nMoves blocked, states faked");
+        console.log("  Стартовая позиция: (" + ghost.startX.toFixed(1) + ", " + ghost.startY.toFixed(1) + ")");
+        console.log("  Фейк позиция:     (" + ghost.fakeX + ", " + ghost.fakeY + ")");
+        console.log("  Ходьба БЛОКИРУЕТСЯ (сервер не видит)");
+        console.log("  Состояния ПОДМЕНЯЮТСЯ (фейк координаты)");
+        console.log("");
+        console.log("  Ходи куда хочешь - другие не видят!");
+        console.log("  ghost(false) - телепорт на последнюю позицию");
+        console.log("  ghostBack()  - вернуться на стартовую");
+        console.log("=".repeat(50));
+        showAlert("Ghost", "Ghost ON!\nТы невидим!\nghost(false) = телепорт туда где ты");
     };
 
     global.ghostPos = function(x, y) {
-        ghostData.fakeX = x;
-        ghostData.fakeY = y;
-        console.log("[GHOST] Fake position set: (" + x + ", " + y + ")");
-        if (ghostData.ghostMode) {
-            sendStatePacket(ghostData.uid, ghostData.fakeX, ghostData.fakeY, ghostData.dir, "", 0);
+        ghost.fakeX = x;
+        ghost.fakeY = y;
+        console.log("[GHOST] Фейк позиция: (" + x + ", " + y + ")");
+        if (ghost.active) {
+            sendStatePacket(ghost.uid, ghost.fakeX, ghost.fakeY, ghost.dir, "", 0);
         }
     };
 
-    // --- Teleport ---
-    global.tp = function(x, y) {
-        teleportTo(x, y);
+    // Вернуться на СТАРТОВУЮ позицию (где включил ghost)
+    global.ghostBack = function() {
+        if (ghost.startX !== 0 || ghost.startY !== 0) {
+            ghost.active = false;
+            blockMoves = false;
+            ghost.blockedMoves = 0;
+            ghost.fakedStates = 0;
+            teleportTo(ghost.startX, ghost.startY);
+            console.log("[GHOST OFF] Вернулся на старт (" + ghost.startX.toFixed(1) + ", " + ghost.startY.toFixed(1) + ")");
+            showAlert("Ghost", "Ghost OFF\nВернулся на старт");
+        } else {
+            console.log("[!] Нет стартовой позиции");
+        }
     };
 
+    global.tp = function(x, y) { teleportTo(x, y); };
+
     global.tpRel = function(dx, dy) {
-        teleportTo(ghostData.realX + dx, ghostData.realY + dy);
+        teleportTo(ghost.realX + dx, ghost.realY + dy);
     };
 
     global.save = function() {
-        ghostData.savedPos.x = ghostData.realX;
-        ghostData.savedPos.y = ghostData.realY;
-        console.log("[SAVE] (" + ghostData.realX.toFixed(1) + ", " + ghostData.realY.toFixed(1) + ")");
-        showAlert("Ghost", "Position saved\n(" + ghostData.realX.toFixed(0) + ", " + ghostData.realY.toFixed(0) + ")");
+        ghost.startX = ghost.realX;
+        ghost.startY = ghost.realY;
+        console.log("[SAVE] (" + ghost.realX.toFixed(1) + ", " + ghost.realY.toFixed(1) + ")");
+        showAlert("Ghost", "Сохранено\n(" + ghost.realX.toFixed(0) + ", " + ghost.realY.toFixed(0) + ")");
     };
 
     global.back = function() {
-        if (ghostData.savedPos.x !== 0 || ghostData.savedPos.y !== 0) {
-            teleportTo(ghostData.savedPos.x, ghostData.savedPos.y);
+        if (ghost.startX !== 0 || ghost.startY !== 0) {
+            teleportTo(ghost.startX, ghost.startY);
         } else {
-            console.log("[!] No saved position");
-            showAlert("Ghost", "No saved position");
+            console.log("[!] Нет сохранённой позиции");
         }
     };
 
     global.off = function() {
-        if (ghostData.ghostMode) ghost(false);
-        showAlert("Ghost", "Everything off");
+        if (ghost.active) global.ghost(false);
     };
 
-    // --- Info ---
     global.info = function() {
         console.log("\n" + "=".repeat(50));
-        console.log("STATUS");
+        console.log("СТАТУС");
         console.log("=".repeat(50));
-        console.log("UID:            " + ghostData.uid);
-        console.log("Real position:  (" + ghostData.realX.toFixed(2) + ", " + ghostData.realY.toFixed(2) + ")");
-        console.log("Saved position: (" + ghostData.savedPos.x.toFixed(2) + ", " + ghostData.savedPos.y.toFixed(2) + ")");
-        console.log("Direction:      " + ghostData.dir);
+        console.log("UID:            " + ghost.uid);
+        console.log("Реальная поз:   (" + ghost.realX.toFixed(2) + ", " + ghost.realY.toFixed(2) + ")");
+        console.log("Стартовая поз:  (" + ghost.startX.toFixed(2) + ", " + ghost.startY.toFixed(2) + ")");
+        console.log("Направление:    " + ghost.dir);
         console.log("");
-        console.log("GHOST MODE:     " + (ghostData.ghostMode ? "ON" : "OFF"));
-        console.log("Block moves:    " + (blockMoveRequests ? "YES" : "NO"));
-        console.log("Fake position:  (" + ghostData.fakeX + ", " + ghostData.fakeY + ")");
-        console.log("Blocked moves:  " + ghostData.blockedMoves);
-        console.log("Faked states:   " + ghostData.blockedStates);
+        console.log("GHOST:          " + (ghost.active ? "ВКЛ" : "ВЫКЛ"));
+        console.log("Блокировка:     " + (blockMoves ? "ДА" : "НЕТ"));
+        console.log("Фейк позиция:   (" + ghost.fakeX + ", " + ghost.fakeY + ")");
+        console.log("Заблокировано:  " + ghost.blockedMoves + " ходьбы, " + ghost.fakedStates + " состояний");
         console.log("");
-        console.log("ROOM:           " + currentRoomId);
-        console.log("=".repeat(50) + "\n");
+        console.log("Комната:        " + currentRoomId);
+        console.log("=".repeat(50));
+    };
+
+    global.pos = function() {
+        console.log("[POS] Реальная: (" + ghost.realX.toFixed(2) + ", " + ghost.realY.toFixed(2) + ") | Старт: (" + ghost.startX.toFixed(2) + ", " + ghost.startY.toFixed(2) + ")");
+    };
+
+    global.debug = function() {
+        console.log("\n" + "=".repeat(50));
+        console.log("DEBUG INFO");
+        console.log("=".repeat(50));
+        console.log("ghost.uid:       " + JSON.stringify(ghost.uid));
+        console.log("ghost.roomStr:   " + (ghost.roomStr ? ghost.roomStr.toString() : "null"));
+        console.log("ghost.active:    " + ghost.active);
+        console.log("blockMoves:      " + blockMoves);
+        console.log("internalPacket:  " + internalPacket);
+        console.log("ghost.realX/Y:   " + ghost.realX + ", " + ghost.realY);
+        console.log("ghost.fakeX/Y:   " + ghost.fakeX + ", " + ghost.fakeY);
+        console.log("ghost.startX/Y:  " + ghost.startX + ", " + ghost.startY);
+        console.log("ghost.destX/Y:   " + ghost.destX + ", " + ghost.destY);
+        console.log("ghost.dir:       " + ghost.dir);
+        console.log("myPlayerId:      " + myPlayerId);
+        console.log("currentRoomId:   " + currentRoomId);
+        console.log("globalProcessor: " + (globalProcessor ? "OK" : "null"));
+        console.log("schedule:        " + (schedule ? "OK" : "null"));
+        console.log("pinnedMemory:    " + pinnedMemory.length + " items");
+        console.log("blockedRequests: " + Object.keys(blockedRequests).length + " pending");
+        console.log("StateRequestCtor: " + StateRequestCtor);
+        console.log("MoveRequestCtor:  " + MoveRequestCtor);
+        console.log("=".repeat(50));
     };
 
     global.help = function() {
         console.log("\n" + "=".repeat(50));
-        console.log("Ghost Mode v4.0 - Commands");
+        console.log("Ghost Mode v5.1 - Команды");
         console.log("=".repeat(50));
         console.log("");
         console.log("GHOST:");
-        console.log("  ghost()         - Enable (become invisible)");
-        console.log("  ghost(false)    - Disable (return to saved pos)");
-        console.log("  ghostPos(x,y)   - Change fake position");
+        console.log("  ghost()         - включить (стать невидимым)");
+        console.log("  ghost(false)    - выключить -> телепорт ТУДА ГДЕ СТОИШЬ");
+        console.log("  ghostBack()     - выключить -> телепорт НА СТАРТ");
+        console.log("  ghostPos(x,y)   - изменить фейк позицию");
         console.log("");
-        console.log("TELEPORT:");
-        console.log("  tp(x, y)        - Teleport to coordinates");
-        console.log("  tpRel(dx, dy)   - Relative teleport");
-        console.log("  save()          - Save current position");
-        console.log("  back()          - Return to saved position");
+        console.log("ТЕЛЕПОРТ:");
+        console.log("  tp(x, y)        - телепорт на координаты");
+        console.log("  tpRel(dx, dy)   - относительный телепорт");
+        console.log("  save()          - сохранить позицию");
+        console.log("  back()          - вернуться на сохранённую");
         console.log("");
-        console.log("INFO:");
-        console.log("  info()          - Show status");
-        console.log("  off()           - Turn everything off");
-        console.log("=".repeat(50) + "\n");
+        console.log("ИНФО:");
+        console.log("  info()          - полный статус");
+        console.log("  pos()           - текущая позиция");
+        console.log("  debug()         - отладочная информация");
+        console.log("=".repeat(50));
     };
 
     // =========================================================
-    // HOOK: scheduleRequest - REPLACE FOR BLOCKING MOVES
+    // ХУК: scheduleRequest - БЛОКИРОВКА ХОДЬБЫ
     // =========================================================
     if (scheduleRequestAddr) {
         var originalSchedule = new NativeFunction(scheduleRequestAddr, 'void', ['pointer', 'pointer']);
         schedule = originalSchedule;
 
         Interceptor.replace(scheduleRequestAddr, new NativeCallback(function(processor, request) {
-            // Capture processor
             if (!globalProcessor) {
                 globalProcessor = processor;
-                console.log("[+] Processor captured!");
+                console.log("[+] Processor захвачен!");
             }
 
-            // Extract room from request
+            // Извлекаем room
             try {
                 for (var off = 24; off <= 200; off += 8) {
                     var str = readStdString(request.add(off));
@@ -398,104 +471,145 @@ function initScript() {
                 }
             } catch (e) { }
 
-            // Check if this request is marked for blocking (move requests only)
-            var reqKey = request.toString();
-            if (blockedRequests[reqKey]) {
-                delete blockedRequests[reqKey];
-                ghostData.blockedMoves++;
-                console.log("[GHOST BLOCKED MOVE #" + ghostData.blockedMoves + "]");
-                return; // Don't call original
+            // Проверяем блокировку (только move requests)
+            var key = request.toString();
+            if (blockedRequests[key]) {
+                delete blockedRequests[key];
+                ghost.blockedMoves++;
+                if (ghost.blockedMoves <= 3 || ghost.blockedMoves % 50 === 0) {
+                    console.log("[GHOST] Блок ходьбы #" + ghost.blockedMoves);
+                }
+                return; // Не отправляем
             }
 
-            // Pass through to original
             originalSchedule(processor, request);
-
         }, 'void', ['pointer', 'pointer']));
 
-        console.log("[+] scheduleRequest replaced");
+        console.log("[+] scheduleRequest заменён");
     }
 
     // =========================================================
-    // HOOK: RoomAvatarMoveRequest - BLOCK MOVES IN GHOST MODE
+    // ХУК: MoveRequest - ЗАХВАТ ДАННЫХ + БЛОКИРОВКА
+    //
+    // Сигнатура: C1(this, const string& uid, Vec2 dest, Vec2 source, const string& room)
+    // ARM64: args[0]=this, args[1]=&uid, args[2]=&room (Vec2 в float регистрах)
     // =========================================================
-    if (RoomAvatarMoveRequest_C1) {
-        Interceptor.attach(RoomAvatarMoveRequest_C1, {
+    if (MoveRequestCtor) {
+        Interceptor.attach(MoveRequestCtor, {
             onEnter: function(args) {
                 this.reqPtr = args[0];
 
+                // Захватываем UID
                 var uid = readStdString(args[1]);
+                if (uid && /^\d{3,20}$/.test(uid)) {
+                    if (!ghost.uid) {
+                        ghost.uid = uid;
+                        myPlayerId = uid;
+                        console.log("[+] My ID: " + uid);
+                    }
+                }
 
-                // Capture player ID
-                if (uid && /^\d{3,20}$/.test(uid) && !myPlayerId) {
-                    myPlayerId = uid;
-                    ghostData.uid = uid;
-                    console.log("[+] My ID: " + myPlayerId);
+                // Захватываем room string
+                if (!ghost.roomStr) {
+                    try {
+                        // Пробуем args[2] (ARM64: третий integer регистр = room)
+                        var roomTest = readStdString(args[2]);
+                        if (roomTest && roomTest.indexOf(":") !== -1) {
+                            ghost.roomStr = pin(Memory.alloc(24));
+                            Memory.copy(ghost.roomStr, args[2], 24);
+                            console.log("[+] Room из MoveRequest: " + roomTest);
+                        }
+                    } catch (e) { }
+                }
+
+                // Пытаемся прочитать destination Vec2
+                // На разных ABI Vec2 может быть в разных args
+                // Пробуем несколько вариантов
+                var destRead = false;
+                var tryArgs = [2, 3, 4, 5, 6, 7, 8];
+                for (var i = 0; i < tryArgs.length && !destRead; i++) {
+                    try {
+                        var vec = unpackVec2(args[tryArgs[i]]);
+                        if (vec && isFinite(vec.x) && isFinite(vec.y) &&
+                            Math.abs(vec.x) < 50000 && Math.abs(vec.y) < 50000 &&
+                            (vec.x !== 0 || vec.y !== 0)) {
+                            ghost.destX = vec.x;
+                            ghost.destY = vec.y;
+                            destRead = true;
+                        }
+                    } catch (e) { }
                 }
             },
             onLeave: function() {
-                // In ghost mode: mark move requests for blocking
-                if (blockMoveRequests && this.reqPtr) {
+                // В ghost mode: помечаем move request для блокировки
+                if (blockMoves && this.reqPtr) {
                     blockedRequests[this.reqPtr.toString()] = true;
-                    console.log("[GHOST] Move request marked for blocking");
                 }
             }
         });
-        console.log("[+] RoomAvatarMoveRequest hooked");
+        console.log("[+] MoveRequest: хук (захват uid/room/dest + блокировка)");
     }
 
     // =========================================================
-    // HOOK: RoomAvatarUpdateStateRequest - FAKE COORDS (NOT BLOCK)
+    // ХУК: StateRequest - ЗАХВАТ ПОЗИЦИИ + ФЕЙК КООРДИНАТ
     //
-    // FIX: Previously this hook also marked state requests for
-    // blocking in onLeave, which meant the faked coordinates
-    // never reached the server. Now state requests pass through
-    // with faked coords so the server sees the fake position.
+    // Координаты здесь надёжные (из stateData структуры).
+    // В ghost mode подменяем координаты на фейковые.
+    // Запрос НЕ блокируется — уходит на сервер с фейком.
     // =========================================================
-    if (RoomAvatarUpdateStateRequest_C1) {
-        Interceptor.attach(RoomAvatarUpdateStateRequest_C1, {
+    if (StateRequestCtor) {
+        Interceptor.attach(StateRequestCtor, {
             onEnter: function(args) {
-                this.reqPtr = args[0];
                 var stateData = args[1];
                 var roomStr = args[2];
 
-                // Capture room string
-                if (!ghostData.roomStr) {
-                    ghostData.roomStr = Memory.alloc(24);
-                    Memory.copy(ghostData.roomStr, roomStr, 24);
-                    console.log("[+] Room string captured!");
+                // Захватываем room string
+                if (!ghost.roomStr) {
+                    ghost.roomStr = pin(Memory.alloc(24));
+                    Memory.copy(ghost.roomStr, roomStr, 24);
+                    console.log("[+] Room из StateRequest!");
                 }
 
-                // Read real data
-                ghostData.uid = readStdString(stateData.add(0));
-                ghostData.realX = stateData.add(24).readFloat();
-                ghostData.realY = stateData.add(28).readFloat();
-                ghostData.dir = stateData.add(32).readS32();
-                ghostData.action = readStdString(stateData.add(40));
-                ghostData.state = stateData.add(64).readS32();
+                // Читаем реальные данные (только из игровых пакетов, не из наших)
+                if (!internalPacket) {
+                    var uid = readStdString(stateData.add(0));
+                    if (uid && /^\d{3,20}$/.test(uid)) {
+                        ghost.uid = uid;
+                        if (!myPlayerId) {
+                            myPlayerId = uid;
+                            console.log("[+] My ID: " + uid);
+                        }
+                    }
 
-                // Ghost mode: replace coordinates with fake ones
-                // The request will NOT be blocked - it goes to the server with fake coords
-                if (ghostData.ghostMode && blockMoveRequests) {
-                    stateData.add(24).writeFloat(ghostData.fakeX);
-                    stateData.add(28).writeFloat(ghostData.fakeY);
-                    ghostData.blockedStates++;
-                    console.log("[GHOST FAKE STATE #" + ghostData.blockedStates + "] (" +
-                        ghostData.realX.toFixed(0) + "," + ghostData.realY.toFixed(0) + ") -> (" +
-                        ghostData.fakeX + "," + ghostData.fakeY + ")");
+                    ghost.realX = stateData.add(24).readFloat();
+                    ghost.realY = stateData.add(28).readFloat();
+                    ghost.dir = stateData.add(32).readS32();
+                }
+
+                // Ghost mode: подменяем координаты на фейковые
+                // Запрос уходит на сервер с фейком — НЕ блокируется!
+                if (ghost.active && blockMoves && !internalPacket) {
+                    stateData.add(24).writeFloat(ghost.fakeX);
+                    stateData.add(28).writeFloat(ghost.fakeY);
+                    ghost.fakedStates++;
+                    if (ghost.fakedStates <= 3 || ghost.fakedStates % 50 === 0) {
+                        console.log("[GHOST] Фейк #" + ghost.fakedStates +
+                            " (" + ghost.realX.toFixed(0) + "," + ghost.realY.toFixed(0) +
+                            ") -> (" + ghost.fakeX + "," + ghost.fakeY + ")");
+                    }
                 }
             }
-            // FIX: No onLeave blocking! State requests must reach the server
-            // with faked coordinates. Only move requests get blocked.
+            // НЕТ onLeave блокировки! State запросы должны дойти до сервера.
         });
-        console.log("[+] RoomAvatarUpdateStateRequest hooked");
+        console.log("[+] StateRequest: хук (захват позиции + фейк)");
     }
 
     // =========================================================
-    // CHAT HANDLER (for in-game commands)
+    // ЧАТ (команды через игровой чат)
     // =========================================================
-    var clientsendAddr = get_func("_ZN3ags6Client15sendChatMessageERKNSt6__ndk112basic_stringIcNS1_11char_traitsIcEENS1_9allocatorIcEEEES9_RKN7cocos2d5ValueE");
-    if (clientsendAddr) {
-        Interceptor.attach(clientsendAddr, {
+    var chatAddr = get_func("_ZN3ags6Client15sendChatMessageERKNSt6__ndk112basic_stringIcNS1_11char_traitsIcEENS1_9allocatorIcEEEES9_RKN7cocos2d5ValueE");
+    if (chatAddr) {
+        Interceptor.attach(chatAddr, {
             onEnter: function (args) {
                 var msg = readStdString(args[1]).trim();
                 var myId = getPlayerID();
@@ -504,57 +618,57 @@ function initScript() {
                 if (myId && senderId && senderId !== myId) return;
                 if (msg.indexOf("!") === 0) patchExistingString(args[1], "");
 
-                var parts = msg.split(" ");
-                var cmd = parts[0];
-                var arg1 = parts[1];
-                var arg2 = parts[2];
+                var p = msg.split(" ");
+                var cmd = p[0];
+                var a1 = p[1];
+                var a2 = p[2];
 
-                if (cmd === "!ghost") { ghost(); }
-                if (cmd === "!unghost") { ghost(false); }
-                if (cmd === "!ghostpos" && arg1 && arg2) { ghostPos(parseFloat(arg1), parseFloat(arg2)); }
-                if (cmd === "!tp" && arg1 && arg2) { tp(parseFloat(arg1), parseFloat(arg2)); }
-                if (cmd === "!tprel" && arg1 && arg2) { tpRel(parseFloat(arg1), parseFloat(arg2)); }
-                if (cmd === "!save") { save(); }
-                if (cmd === "!back") { back(); }
-                if (cmd === "!off") { off(); }
-                if (cmd === "!info") { info(); }
+                if (cmd === "!ghost") global.ghost();
+                if (cmd === "!unghost") global.ghost(false);
+                if (cmd === "!ghostback") global.ghostBack();
+                if (cmd === "!ghostpos" && a1 && a2) global.ghostPos(parseFloat(a1), parseFloat(a2));
+                if (cmd === "!tp" && a1 && a2) global.tp(parseFloat(a1), parseFloat(a2));
+                if (cmd === "!tprel" && a1 && a2) global.tpRel(parseFloat(a1), parseFloat(a2));
+                if (cmd === "!save") global.save();
+                if (cmd === "!back") global.back();
+                if (cmd === "!off") global.off();
+                if (cmd === "!info") global.info();
+                if (cmd === "!pos") global.pos();
                 if (cmd === "!status") {
                     showAlert("Ghost",
-                        "Ghost: " + (ghostData.ghostMode ? "ON" : "OFF") + "\n" +
-                        "Blocked moves: " + ghostData.blockedMoves + "\n" +
-                        "Faked states: " + ghostData.blockedStates + "\n" +
-                        "Pos: (" + ghostData.realX.toFixed(0) + "," + ghostData.realY.toFixed(0) + ")");
+                        "Ghost: " + (ghost.active ? "ВКЛ" : "ВЫКЛ") + "\n" +
+                        "Заблок: " + ghost.blockedMoves + " | Фейк: " + ghost.fakedStates + "\n" +
+                        "Поз: (" + ghost.realX.toFixed(0) + "," + ghost.realY.toFixed(0) + ")");
                 }
                 if (cmd === "!help") {
                     showAlert("Ghost",
-                        "=== GHOST ===\n!ghost !unghost\n!ghostpos x y\n\n" +
-                        "=== TP ===\n!tp x y\n!save !back\n\n" +
-                        "=== OTHER ===\n!off !info !status");
+                        "=== GHOST ===\n!ghost !unghost\n!ghostback !ghostpos x y\n\n" +
+                        "=== TP ===\n!tp x y | !save !back\n\n" +
+                        "=== ИНФО ===\n!info !pos !status");
                 }
             }
         });
-        console.log("[+] Chat hooked!");
+        console.log("[+] Чат: хук");
     }
 
     globalProcessor = getCmdProcessor();
 
     // =========================================================
-    // STARTUP MESSAGE
+    // СТАРТ
     // =========================================================
-    console.log("\n==========================================================");
-    console.log(" Ghost Mode v4.0 - FIXED");
-    console.log("==========================================================");
-    console.log(" Ghost Mode:  OK (state requests pass with fake coords)");
-    console.log(" Teleport:    OK");
+    console.log("\n" + "=".repeat(50));
+    console.log(" Ghost Mode v5.1");
+    console.log("=".repeat(50));
     console.log("");
-    console.log(" HOW TO USE:");
-    console.log("   1. Walk around (captures data)");
-    console.log("   2. ghost()      - become invisible");
-    console.log("   3. Walk around  - others can't see you");
-    console.log("   4. ghost(false) - return to saved position");
+    console.log(" КАК ПОЛЬЗОВАТЬСЯ:");
+    console.log("   1. Сделай один шаг (захват uid + room)");
+    console.log("   2. ghost()      - стать невидимым");
+    console.log("   3. Ходи куда хочешь - никто не видит!");
+    console.log("   4. ghost(false) - телепорт ТУДА ГДЕ СТОИШЬ");
+    console.log("      ghostBack()  - телепорт НА СТАРТ");
     console.log("");
-    console.log(" help() - all commands");
-    console.log("==========================================================\n");
+    console.log(" help() - все команды");
+    console.log("=".repeat(50));
 }
 
 waitForModule();
